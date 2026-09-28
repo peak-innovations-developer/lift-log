@@ -175,8 +175,83 @@ function load() {
 function save() {
   const s = JSON.stringify(db);
   try { localStorage.setItem(KEY, s); } catch (e) { memStore = s; }
+  queuePush();
 }
 try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch (e) {}
+
+// ---------- cloud backup ----------
+// Off-device backup so a lost phone doesn't take the history with it.
+// The anon key below is public by design and grants nothing on its own: the
+// backups table denies it outright, and the only way in is two functions that
+// both demand the sync code. The code is the real secret -- it is generated on
+// this device, never leaves it except to talk to the backup, and is shown in
+// Settings so it can be written down. Lose it and the backup is unreachable.
+const SB_URL = 'https://eojdoxilyvlwamjbqlrv.supabase.co';
+const SB_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVvamRveGlseXZsd2FtamJxbHJ2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjcwNTQwMzgsImV4cCI6MjA4MjYzMDAzOH0.r_3kTqa8DufglUk3O9nxbeKWGAJG3ojVD6T4leN03rY';
+const CODE_KEY = 'liftlog.sync';
+let syncState = 'idle', syncErr = '', pushTimer = null;
+
+function syncCode() {
+  let c = null;
+  try { c = localStorage.getItem(CODE_KEY); } catch (e) {}
+  if (!c) {
+    c = crypto.randomUUID();
+    try { localStorage.setItem(CODE_KEY, c); } catch (e) {}
+  }
+  return c;
+}
+
+async function rpc(fn, body) {
+  const r = await fetch(SB_URL + '/rest/v1/rpc/' + fn, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', apikey: SB_ANON, authorization: 'Bearer ' + SB_ANON },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error((await r.text()).slice(0, 160));
+  return r.json();
+}
+
+// Debounced: a burst of set edits should be one upload, not twenty.
+function queuePush() { clearTimeout(pushTimer); pushTimer = setTimeout(pushNow, 2000); }
+
+async function pushNow() {
+  clearTimeout(pushTimer);
+  if (!db) return;
+  if (!navigator.onLine) { syncState = 'offline'; return paintSync(); }
+  syncState = 'syncing'; paintSync();
+  try {
+    await rpc('liftlog_push', { p_code: syncCode(), p_payload: db });
+    db.lastSync = Date.now(); syncState = 'ok'; syncErr = '';
+    // Written straight through rather than via save(), which would queue another push.
+    try { localStorage.setItem(KEY, JSON.stringify(db)); } catch (e) {}
+  } catch (e) {
+    syncState = 'error'; syncErr = String((e && e.message) || e);
+  }
+  paintSync();
+}
+
+// Whatever failed to go out while the signal was gone goes out when it returns.
+addEventListener('online', () => { if (syncState !== 'ok') pushNow(); });
+
+async function pullInto(code) {
+  const payload = await rpc('liftlog_pull', { p_code: code });
+  if (!payload) return false;
+  db = payload;
+  const d = DEFAULTS();
+  for (const k in d) if (db[k] === undefined) db[k] = d[k];
+  for (const k in d.settings) if (db.settings[k] === undefined) db.settings[k] = d.settings[k];
+  save();
+  return true;
+}
+
+function syncLabel() {
+  if (syncState === 'syncing') return 'Backing up\u2026';
+  if (syncState === 'error') return 'Backup failed, will retry. ' + syncErr;
+  if (syncState === 'offline') return 'Offline. Will back up when you have signal.';
+  if (db && db.lastSync) return 'Backed up ' + new Date(db.lastSync).toLocaleString();
+  return 'Not backed up yet.';
+}
+function paintSync() { const el = $('#syncLine'); if (el) el.textContent = syncLabel(); }
 
 // ---------- exercise helpers ----------
 const kindOf = n => db.kinds[key(n)] || 'bw';          // load = dumbbells etc, addon = bodyweight + optional weight, bw = bodyweight only
@@ -436,7 +511,10 @@ function vSettings() {
   <div class="rest" style="display:inline-flex"><button data-act="defRest" data-d="-15">−</button><span style="font-size:17px;min-width:60px">${fmtT(db.settings.rest)}</span><button data-act="defRest" data-d="15">+</button></div></div>
   <div class="card"><b>Travel swaps</b><div class="mut small" style="margin:2px 0 8px">Remembered when you swap a weights exercise in travel mode.</div>
   ${Object.keys(db.settings.subs).length ? Object.entries(db.settings.subs).map(([k, v]) => `<div class="row" style="align-items:center;margin:4px 0"><span>${esc(canonFromKey(k))} → ${esc(v)}</span><button style="flex:none" data-act="delSub" data-k="${esc(k)}">✕</button></div>`).join('') : '<div class="mut small">None yet</div>'}</div>
-  <div class="card"><b>Data</b><div class="mut small" style="margin:2px 0 8px">${db.sessions.length} workouts saved on this phone. Export now and then as a backup.</div>
+  <div class="card"><b>Automatic backup</b><div class="mut small" id="syncLine" style="margin:2px 0 8px">${esc(syncLabel())}</div>
+  <div class="mut small" style="margin:2px 0 8px">Sync code. Write this down somewhere that is not this phone \u2014 it is the only way to get your history onto a new one.<div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all;margin-top:4px;user-select:all">${esc(syncCode())}</div></div>
+  <div class="row"><button data-act="syncNow">Back up now</button><button data-act="restore">Restore from code</button></div></div>
+  <div class="card"><b>Data</b><div class="mut small" style="margin:2px 0 8px">${db.sessions.length} workouts saved on this phone.</div>
   <div class="row"><button data-act="import">Import Easy Reps CSV</button><button data-act="export">Export CSV</button></div></div>
   <div class="card"><button class="danger" data-act="wipe" style="background:none;padding:0">Erase everything</button></div>`;
 }
@@ -680,6 +758,18 @@ const act = {
   delSub(b) { delete db.settings.subs[b.dataset.k]; save(); render(); },
   import() { $('#file').value = ''; $('#file').click(); },
   export() { exportCSV(); },
+  syncNow() { pushNow(); },
+  async restore() {
+    const c = (await askText('Paste the sync code from your other phone', '') || '').trim();
+    if (!c) return;
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(c)) return toast('That is not a sync code');
+    if (!await ask('Replace everything on this phone with the backup for that code?', 'Restore', true)) return;
+    try {
+      if (!await pullInto(c)) return toast('No backup found for that code');
+      try { localStorage.setItem(CODE_KEY, c); } catch (e) {}
+      view = 'home'; render(); toast('Restored');
+    } catch (e) { toast('Restore failed'); }
+  },
   async wipe() { if (await ask('Erase all workouts, templates and settings on this phone? Export first if you want a backup.', 'Erase everything', true)) { db = DEFAULTS(); save(); view = 'home'; render(); } },
 };
 
@@ -798,6 +888,7 @@ load();
 if (window.SEED_CSV && !db.sessions.length && !db.imported) { const rows = parseCSV(window.SEED_CSV), hd = rows.shift().map(h => h.trim()); importHistory(rows, n => hd.indexOf(n)); applyKinds(); db.imported = true; save(); }
 if (db.active) { view = 'workout'; wake(); }
 render();
+queuePush();
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => {});
 </script>
 </body>
