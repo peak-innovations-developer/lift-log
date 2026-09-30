@@ -26,7 +26,14 @@ input{font:inherit;color:var(--text);background:var(--bg);border:1px solid var(-
 h1{font-size:26px;margin:4px 0}
 h2{font-size:18px;margin:18px 0 8px}
 .top{display:flex;align-items:center;gap:8px;justify-content:space-between}
-.top .r{display:flex;gap:6px}
+.top .r{display:flex;gap:6px;align-items:center}
+.gear{font-size:25px;line-height:1;padding:4px 10px;min-height:44px;display:flex;align-items:center;justify-content:center}
+.wfoot{display:flex;gap:8px;margin-top:16px}
+.wfoot button{flex:1;padding:14px;font-size:17px}
+.wfoot .pri{flex:1.4}
+.wfoot .danger{background:none;box-shadow:inset 0 0 0 1px var(--line)}
+.warncard{background:var(--card);border:1px solid var(--warn);border-radius:14px;padding:12px;margin:10px 0}
+.code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all;user-select:all;background:var(--bg);border-radius:8px;padding:8px;margin-top:8px;font-size:14px}
 .mut{color:var(--mut)}
 .small{font-size:13px}
 .card{background:var(--card);border-radius:14px;padding:12px;margin:10px 0}
@@ -158,7 +165,7 @@ const DEFAULTS = () => ({
     T('Push', [['Ring Dips',2],['Pike Push Ups',2],['Standing Dumbbell Press',2],['Ring push ups',2,1],['TRX scull crusher tricep extension superset',2]]),
     T('Pull', [['Pull Ups',2],['Ring row',2],['Dumbbell Bicep Curl',2],['TRX Y',2],['Pelican curl',2],['TRX hammer',2]]),
   ],
-  sessions: [], active: null, timer: null, imported: false,
+  sessions: [], active: null, timer: null, imported: false, codeAck: false,
 });
 
 // ---------- storage ----------
@@ -189,17 +196,23 @@ try { navigator.storage && navigator.storage.persist && navigator.storage.persis
 const SB_URL = 'https://eojdoxilyvlwamjbqlrv.supabase.co';
 const SB_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVvamRveGlseXZsd2FtamJxbHJ2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjcwNTQwMzgsImV4cCI6MjA4MjYzMDAzOH0.r_3kTqa8DufglUk3O9nxbeKWGAJG3ojVD6T4leN03rY';
 const CODE_KEY = 'liftlog.sync';
+// Set once this device is known to hold the RIGHT code -- either it pulled a
+// backup down with it, or it pushed real history up with it. Until then the code
+// is just a uuid this device invented, and an empty history must not be trusted
+// to overwrite anything.
+const OK_KEY = 'liftlog.codeok';
 let syncState = 'idle', syncErr = '', pushTimer = null;
 
+const lsGet = k => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
+
 function syncCode() {
-  let c = null;
-  try { c = localStorage.getItem(CODE_KEY); } catch (e) {}
-  if (!c) {
-    c = crypto.randomUUID();
-    try { localStorage.setItem(CODE_KEY, c); } catch (e) {}
-  }
+  let c = lsGet(CODE_KEY);
+  if (!c) { c = crypto.randomUUID(); lsSet(CODE_KEY, c); }
   return c;
 }
+const codeEstablished = () => lsGet(OK_KEY) === '1';
+const markEstablished = () => lsSet(OK_KEY, '1');
 
 async function rpc(fn, body) {
   const r = await fetch(SB_URL + '/rest/v1/rpc/' + fn, {
@@ -217,10 +230,17 @@ function queuePush() { clearTimeout(pushTimer); pushTimer = setTimeout(pushNow, 
 async function pushNow() {
   clearTimeout(pushTimer);
   if (!db) return;
+  // A blank slate never overwrites a backup. A cleared browser store or a fresh
+  // install has no history and no proof its code is the right one -- pushing then
+  // would either strand an empty row under a brand new code or, if the code were
+  // real, wipe the history it was meant to protect. Hold until there is either
+  // something to save or a pull that proves the code.
+  if (!db.sessions.length && !codeEstablished()) { syncState = 'hold'; return paintSync(); }
   if (!navigator.onLine) { syncState = 'offline'; return paintSync(); }
   syncState = 'syncing'; paintSync();
   try {
     await rpc('liftlog_push', { p_code: syncCode(), p_payload: db });
+    markEstablished();
     db.lastSync = Date.now(); syncState = 'ok'; syncErr = '';
     // Written straight through rather than via save(), which would queue another push.
     try { localStorage.setItem(KEY, JSON.stringify(db)); } catch (e) {}
@@ -237,6 +257,7 @@ async function pullInto(code) {
   const payload = await rpc('liftlog_pull', { p_code: code });
   if (!payload) return false;
   db = payload;
+  markEstablished();
   const d = DEFAULTS();
   for (const k in d) if (db[k] === undefined) db[k] = d[k];
   for (const k in d.settings) if (db.settings[k] === undefined) db.settings[k] = d.settings[k];
@@ -248,6 +269,7 @@ function syncLabel() {
   if (syncState === 'syncing') return 'Backing up\u2026';
   if (syncState === 'error') return 'Backup failed, will retry. ' + syncErr;
   if (syncState === 'offline') return 'Offline. Will back up when you have signal.';
+  if (syncState === 'hold') return 'Not backing up yet \u2014 no workouts on this phone. Log one, or restore from your sync code.';
   if (db && db.lastSync) return 'Backed up ' + new Date(db.lastSync).toLocaleString();
   return 'Not backed up yet.';
 }
@@ -359,14 +381,23 @@ function render() {
 }
 function vHome() {
   const a = db.active;
-  let h = `<div class="top"><h1>Lift Log</h1><div class="r"><button data-act="nav" data-v="history">History</button><button data-act="nav" data-v="settings" aria-label="Settings">⚙︎</button></div></div>`;
-  if (a) h += `<div class="card"><div class="mut small">In progress</div><div style="font-size:18px;font-weight:700;margin:2px 0 10px">${esc(a.name)} · <span data-elapsed></span></div><button class="pri big" data-act="nav" data-v="workout">Resume</button></div>`;
+  let h = `<div class="top"><h1>Lift Log</h1><div class="r"><button data-act="nav" data-v="history">History</button><button class="gear" data-act="nav" data-v="settings" aria-label="Settings">⚙︎</button></div></div>`;
+  if (!db.sessions.length && !codeEstablished()) h += `<div class="warncard"><b>This phone has no history on it</b>
+    <div class="mut small" style="margin:4px 0 10px">If you have used Lift Log before, restore from your sync code — nothing gets backed up until you do. Starting fresh is fine too, but write the code below down first. It is the only way back.</div>
+    <button class="pri big" data-act="restore">Restore from code</button>
+    <div class="code">${esc(syncCode())}</div></div>`;
+  if (a) h += `<div class="card"><div class="mut small">${a.start ? 'In progress' : 'Open, not started'}</div><div style="font-size:18px;font-weight:700;margin:2px 0 10px">${esc(a.name)}${a.start ? ' · <span data-elapsed></span>' : ''}</div><button class="pri big" data-act="nav" data-v="workout">${a.start ? 'Resume' : 'Open'}</button></div>`;
   if (!db.imported && !db.sessions.length) h += `<div class="card"><b>Bring in your Easy Reps history</b><div class="mut small" style="margin:4px 0 10px">Pick the History CSV you exported so "last time" numbers show up from day one.</div><button class="pri" data-act="import">Import CSV</button> <button data-act="dismissImport">Skip</button></div>`;
   h += travelSwitch();
-  h += `<h2>Start</h2>`;
-  for (const t of db.templates) {
-    const last = [...db.sessions].reverse().find(s => s.name === t.name);
-    h += `<div class="tmpl"><button class="go card" data-act="start" data-id="${t.id}"><b>${esc(t.name)}</b><span class="mut small">${t.ex.length} exercises${last ? ' · last ' + fmtD(last.end) : ''}</span></button><button data-act="tmplMenu" data-id="${t.id}" aria-label="Template options">⋯</button></div>`;
+  h += `<h2>Up next</h2>`;
+  // Whatever you did most recently sinks to the bottom, so push and pull trade
+  // places on their own and the top row is always the one that is due. Never-done
+  // templates come first; the manual order from the template menu breaks ties.
+  const lastDone = t => { const s = [...db.sessions].reverse().find(x => x.name === t.name); return s ? s.end : null; };
+  const due = db.templates.map((t, i) => ({ t, i, last: lastDone(t) }))
+    .sort((a, b) => (a.last === null ? 0 : 1) - (b.last === null ? 0 : 1) || (a.last - b.last) || (a.i - b.i));
+  for (const { t, last } of due) {
+    h += `<div class="tmpl"><button class="go card" data-act="start" data-id="${t.id}"><b>${esc(t.name)}</b><span class="mut small">${t.ex.length} exercises${last ? ' · last ' + fmtD(last) : ''}</span></button><button data-act="tmplMenu" data-id="${t.id}" aria-label="Template options">⋯</button></div>`;
   }
   h += `<button class="big" style="margin-top:6px" data-act="startEmpty">+ Empty workout</button>`;
   return h;
@@ -376,11 +407,13 @@ function travelSwitch() {
 }
 function vWorkout() {
   const a = db.active;
-  let h = `<div class="whead"><div class="top"><button data-act="nav" data-v="home">‹ Home</button><div style="text-align:center"><b>${esc(a.name)}</b><div class="mut small" data-elapsed></div></div><button class="pri" data-act="finish">Finish</button></div></div>`;
+  let h = `<div class="whead"><div class="top"><button data-act="nav" data-v="home">‹ Home</button><div style="text-align:center"><b>${esc(a.name)}</b><div class="mut small" data-elapsed></div></div><span style="width:60px"></span></div></div>`;
+  if (!a.start) h += `<button class="pri big" data-act="begin">Start workout</button>
+    <div class="mut small" style="text-align:center;margin:8px 2px 0">The clock and the rest timer wait for this. Swap, add or remove exercises first if you want — or just tick a set and it starts itself.</div>`;
   h += travelSwitch();
   a.exercises.forEach((ex, i) => h += vEx(ex, i));
   h += `<button class="big" data-act="addEx">+ Add exercise</button>`;
-  h += `<button class="big danger" style="margin-top:10px;background:none" data-act="discard">Discard workout</button>`;
+  h += `<div class="wfoot"><button class="danger" data-act="discard">Discard</button><button class="pri" data-act="finish">Finish</button></div>`;
   return h;
 }
 function vEx(ex, i) {
@@ -513,10 +546,18 @@ function vSettings() {
   ${Object.keys(db.settings.subs).length ? Object.entries(db.settings.subs).map(([k, v]) => `<div class="row" style="align-items:center;margin:4px 0"><span>${esc(canonFromKey(k))} → ${esc(v)}</span><button style="flex:none" data-act="delSub" data-k="${esc(k)}">✕</button></div>`).join('') : '<div class="mut small">None yet</div>'}</div>
   <div class="card"><b>Automatic backup</b><div class="mut small" id="syncLine" style="margin:2px 0 8px">${esc(syncLabel())}</div>
   <div class="mut small" style="margin:2px 0 8px">Sync code. Write this down somewhere that is not this phone \u2014 it is the only way to get your history onto a new one.<div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all;margin-top:4px;user-select:all">${esc(syncCode())}</div></div>
-  <div class="row"><button data-act="syncNow">Back up now</button><button data-act="restore">Restore from code</button></div></div>
+  <div class="row"><button data-act="syncNow">Back up now</button><button data-act="restore">Restore from code</button></div>
+  ${db.codeAck ? '' : `<button class="big" data-act="showCode" style="margin-top:8px;color:var(--warn)">You have not written this code down yet</button>`}</div>
   <div class="card"><b>Data</b><div class="mut small" style="margin:2px 0 8px">${db.sessions.length} workouts saved on this phone.</div>
   <div class="row"><button data-act="import">Import Easy Reps CSV</button><button data-act="export">Export CSV</button></div></div>
   <div class="card"><button class="danger" data-act="wipe" style="background:none;padding:0">Erase everything</button></div>`;
+}
+function codeSheet() {
+  sheet(`<h3>Write down your sync code</h3>
+    <div class="mut small">There is no account and no reset. This code is the only way to get your history onto another phone — or back onto this one if the browser clears its storage.</div>
+    <div class="code">${esc(syncCode())}</div>
+    <button class="big pri" style="margin-top:12px" data-act="ackCode">I wrote it down</button>
+    <button class="big" style="margin-top:8px;background:none" onclick="closeSheet()">Remind me after the next one</button>`);
 }
 function canonFromKey(k) { return allNames().find(n => n.toLowerCase() === k) || k; }
 
@@ -533,9 +574,11 @@ function beep() {
   } catch (e) {}
   try { navigator.vibrate && navigator.vibrate([200, 100, 200]); } catch (e) {}
 }
+// Ticking a set is starting the workout, whether or not Start got tapped.
+function beginWorkout() { if (db.active && !db.active.start) { db.active.start = Date.now(); save(); wake(); } }
 function startRest(sec, label) { db.timer = { end: Date.now() + sec * 1000, total: sec, label }; firedFor = null; save(); tick(); }
 function tick() {
-  document.querySelectorAll('[data-elapsed]').forEach(el => { el.textContent = db.active ? fmtT((Date.now() - db.active.start) / 1000) : ''; });
+  document.querySelectorAll('[data-elapsed]').forEach(el => { el.textContent = !db.active ? '' : db.active.start ? fmtT((Date.now() - db.active.start) / 1000) : 'Not started'; });
   const el = $('#timer'), t = db.timer;
   if (!t) { el.hidden = true; return; }
   el.hidden = false;
@@ -549,7 +592,7 @@ setInterval(tick, 250);
 
 // wake lock keeps the screen on during a workout
 let wl = null;
-async function wake() { try { if (db.active && 'wakeLock' in navigator && !wl) { wl = await navigator.wakeLock.request('screen'); wl.addEventListener('release', () => wl = null); } } catch (e) {} }
+async function wake() { try { if (db.active && db.active.start && 'wakeLock' in navigator && !wl) { wl = await navigator.wakeLock.request('screen'); wl.addEventListener('release', () => wl = null); } } catch (e) {} }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { wake(); tick(); } });
 
 // ---------- sheet + toast ----------
@@ -601,14 +644,17 @@ const act = {
   async start(b) {
     if (db.active && !(await ask('A workout is already in progress. Discard it and start this one?', 'Discard and start', true))) return;
     const t = db.templates.find(x => x.id === b.dataset.id);
-    db.active = { id: uid(), name: t.name, tmplId: t.id, start: Date.now(), exercises: t.ex.map(e => { const x = newEx(e.name, e.bw, e.sets); x.tmplBw = e.bw; return x; }) };
-    db.timer = null; save(); view = 'workout'; render(); window.scrollTo(0, 0); wake();
+    // start stays null until Start is tapped (or the first set is ticked), so opening
+    // a workout to edit it does not put a running clock on a session you never did.
+    db.active = { id: uid(), name: t.name, tmplId: t.id, start: null, opened: Date.now(), exercises: t.ex.map(e => { const x = newEx(e.name, e.bw, e.sets); x.tmplBw = e.bw; return x; }) };
+    db.timer = null; save(); view = 'workout'; render(); window.scrollTo(0, 0);
   },
   async startEmpty() {
     if (db.active && !(await ask('A workout is already in progress. Discard it and start a new one?', 'Discard and start', true))) return;
-    db.active = { id: uid(), name: 'Workout', start: Date.now(), exercises: [] };
-    db.timer = null; save(); view = 'workout'; render(); wake();
+    db.active = { id: uid(), name: 'Workout', start: null, opened: Date.now(), exercises: [] };
+    db.timer = null; save(); view = 'workout'; render();
   },
+  begin() { beginWorkout(); render(); window.scrollTo(0, 0); },
   toggleBw(b) { const ex = db.active.exercises[b.dataset.i]; ex.bw = !ex.bw; prefill(ex); save(); render(); },
   rest(b) {
     const ex = db.active.exercises[b.dataset.i]; let v = exRest(ex);
@@ -633,7 +679,7 @@ const act = {
   done(b) {
     const ex = db.active.exercises[b.dataset.i], s = ex.sets[b.dataset.s];
     s.done = !s.done;
-    if (s.done) startRest(exRest(ex), ex.name);
+    if (s.done) { beginWorkout(); startRest(exRest(ex), ex.name); }
     save(); render();
   },
   addSet(b) { const ex = db.active.exercises[b.dataset.i]; const p = ex.sets[ex.sets.length - 1]; ex.sets.push({ w: p ? p.w : 0, r: p ? p.r : 0, done: false }); ex.setsEdited = true; save(); render(); },
@@ -725,12 +771,15 @@ const act = {
       sets.forEach((s, j) => { const c = cmp(s, e.last && e.last[j], e.bw); if (c === 'up') up++; if (c === 'eq') eq++; });
       return { name: e.name, sets, bw: e.bw, orig: e.orig };
     }).filter(e => e.sets.length);
-    const sess = { id: a.id, name: saveAs || a.name, start: a.start, end: Date.now(), exercises: exercises.map(({ name, sets }) => ({ name, sets })) };
+    const sess = { id: a.id, name: saveAs || a.name, start: a.start || a.opened || Date.now(), end: Date.now(), exercises: exercises.map(({ name, sets }) => ({ name, sets })) };
     if (saveAs) db.templates.push({ id: uid(), name: saveAs, ex: exercises.map(e => ({ name: e.name, sets: e.sets.length, bw: e.bw })) });
     db.sessions.push(sess); db.active = null; db.timer = null; save(); closeSheet();
     try { wl && wl.release(); } catch (e) {}
     view = 'home'; render(); window.scrollTo(0, 0);
     toast(`Saved. Beat ${up} set${up === 1 ? '' : 's'}, matched ${eq}.`);
+    // The code is worth nothing written on the phone it lives on. Ask after every
+    // workout until it has actually been written down somewhere else.
+    if (!db.codeAck) setTimeout(codeSheet, 900);
   },
   async discard(b, sure) {
     if (!sure && !(await ask('Discard this workout? Nothing will be saved.', 'Discard', true))) return;
@@ -759,6 +808,8 @@ const act = {
   import() { $('#file').value = ''; $('#file').click(); },
   export() { exportCSV(); },
   syncNow() { pushNow(); },
+  showCode() { codeSheet(); },
+  ackCode() { db.codeAck = true; save(); closeSheet(); toast('Keep it somewhere that is not this phone.'); },
   async restore() {
     const c = (await askText('Paste the sync code from your other phone', '') || '').trim();
     if (!c) return;
@@ -885,6 +936,9 @@ async function exportCSV() {
 
 // ---------- boot ----------
 load();
+// Backfill for installs that predate OK_KEY: history on the device plus a code in
+// the device store is the pairing the flag is meant to record.
+if (db.sessions.length) markEstablished();
 if (window.SEED_CSV && !db.sessions.length && !db.imported) { const rows = parseCSV(window.SEED_CSV), hd = rows.shift().map(h => h.trim()); importHistory(rows, n => hd.indexOf(n)); applyKinds(); db.imported = true; save(); }
 if (db.active) { view = 'workout'; wake(); }
 render();
