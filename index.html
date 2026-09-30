@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -17,8 +17,9 @@
   --acc:#4f9dff;--good:#34c77b;--bad:#ff5d5d;--warn:#f0b43c;--pull:#a77bff;--done:#16301f;
   --safe-b:env(safe-area-inset-bottom,0px);--safe-t:env(safe-area-inset-top,0px);
 }
-*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body{margin:0;background:var(--bg);color:var(--text);font:16px/1.35 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+html,body{margin:0;background:var(--bg);color:var(--text);font:16px/1.35 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;touch-action:manipulation;overscroll-behavior:none}
+input,textarea{-webkit-user-select:text;user-select:text}
 body{padding:calc(var(--safe-t) + 8px) 12px calc(var(--safe-b) + 120px);max-width:560px;margin:0 auto}
 button{font:inherit;color:inherit;background:var(--card2);border:0;border-radius:10px;padding:10px 12px;cursor:pointer}
 button:active{opacity:.7}
@@ -33,7 +34,7 @@ h2{font-size:18px;margin:18px 0 8px}
 .wfoot .pri{flex:1.4}
 .wfoot .danger{background:none;box-shadow:inset 0 0 0 1px var(--line)}
 .warncard{background:var(--card);border:1px solid var(--warn);border-radius:14px;padding:12px;margin:10px 0}
-.code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all;user-select:all;background:var(--bg);border-radius:8px;padding:8px;margin-top:8px;font-size:14px}
+.code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all;-webkit-user-select:all;user-select:all;background:var(--bg);border-radius:8px;padding:8px;margin-top:8px;font-size:14px}
 .mut{color:var(--mut)}
 .small{font-size:13px}
 .card{background:var(--card);border-radius:14px;padding:12px;margin:10px 0}
@@ -54,9 +55,6 @@ h2{font-size:18px;margin:18px 0 8px}
 .chip{padding:6px 9px;font-size:13px;border-radius:8px}
 .chip.bw{background:#2d2640;color:#c9b6ff}
 .chip.wt{background:#1d2c44;color:#9cc6ff}
-.rest{display:flex;align-items:center;background:var(--card2);border-radius:8px}
-.rest button{background:none;padding:6px 8px;font-size:14px}
-.rest span{font-size:13px;min-width:38px;text-align:center}
 .last{font-size:13px;color:var(--mut);margin:6px 0 4px}
 .last b{color:var(--text);font-weight:600}
 .swapnote{background:#3a2e12;color:#f5d28a;border-radius:10px;padding:8px 10px;font-size:14px;display:flex;justify-content:space-between;align-items:center;gap:8px;margin:6px 0}
@@ -131,9 +129,15 @@ select{font:inherit;color:var(--text);background:var(--bg);border:1px solid var(
 .chart .pt{fill:var(--acc)}
 .chart .pt.sel{fill:var(--text);stroke:var(--acc);stroke-width:2.5}
 .restchip em{font-style:normal;color:var(--warn);font-size:11px;margin-left:2px}
-.reststep{display:flex;align-items:center;justify-content:center;gap:14px;margin:14px 0 16px}
-.reststep span{font-size:34px;font-weight:700;font-variant-numeric:tabular-nums;min-width:100px;text-align:center}
-.reststep button{font-size:17px;padding:12px 16px}
+.pwrap{position:relative;margin:10px 0 14px}
+.picker{height:176px;overflow-y:auto;overscroll-behavior:contain;scroll-snap-type:y mandatory;-webkit-overflow-scrolling:touch;touch-action:pan-y;scrollbar-width:none;
+  -webkit-mask-image:linear-gradient(#0000,#000 28%,#000 72%,#0000);mask-image:linear-gradient(#0000,#000 28%,#000 72%,#0000)}
+.picker::-webkit-scrollbar{display:none}
+.plist{padding:66px 0}
+.pitem{height:44px;display:flex;align-items:center;justify-content:center;scroll-snap-align:center;
+  font-size:22px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--mut);transition:color .12s,font-size .12s}
+.pitem.sel{color:var(--text);font-size:32px;font-weight:700}
+.pband{position:absolute;left:0;right:0;top:66px;height:44px;pointer-events:none;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
 </style>
 </head>
 <body>
@@ -377,6 +381,7 @@ function render() {
   else if (view === 'history') app.innerHTML = vHistory();
   else if (view === 'settings') app.innerHTML = vSettings();
   else { view = 'home'; app.innerHTML = vHome(); }
+  if (view === 'settings') mountPicker('defRestP', v => { db.settings.rest = v; save(); });
   tick();
 }
 function vHome() {
@@ -541,11 +546,11 @@ function niceStep(r) { const raw = r / 4, p = Math.pow(10, Math.floor(Math.log10
 function vSettings() {
   return `<div class="top"><button data-act="nav" data-v="home">‹ Home</button><h1 style="font-size:20px">Settings</h1><span style="width:60px"></span></div>
   <div class="card"><b>Default rest</b><div class="mut small" style="margin:2px 0 8px">Used for any exercise you haven't set its own rest on.</div>
-  <div class="rest" style="display:inline-flex"><button data-act="defRest" data-d="-15">−</button><span style="font-size:17px;min-width:60px">${fmtT(db.settings.rest)}</span><button data-act="defRest" data-d="15">+</button></div></div>
+  ${pickerHTML('defRestP', db.settings.rest)}</div>
   <div class="card"><b>Travel swaps</b><div class="mut small" style="margin:2px 0 8px">Remembered when you swap a weights exercise in travel mode.</div>
   ${Object.keys(db.settings.subs).length ? Object.entries(db.settings.subs).map(([k, v]) => `<div class="row" style="align-items:center;margin:4px 0"><span>${esc(canonFromKey(k))} → ${esc(v)}</span><button style="flex:none" data-act="delSub" data-k="${esc(k)}">✕</button></div>`).join('') : '<div class="mut small">None yet</div>'}</div>
   <div class="card"><b>Automatic backup</b><div class="mut small" id="syncLine" style="margin:2px 0 8px">${esc(syncLabel())}</div>
-  <div class="mut small" style="margin:2px 0 8px">Sync code. Write this down somewhere that is not this phone \u2014 it is the only way to get your history onto a new one.<div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all;margin-top:4px;user-select:all">${esc(syncCode())}</div></div>
+  <div class="mut small" style="margin:2px 0 8px">Sync code. Write this down somewhere that is not this phone \u2014 it is the only way to get your history onto a new one.<div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all;margin-top:4px;-webkit-user-select:all;user-select:all">${esc(syncCode())}</div></div>
   <div class="row"><button data-act="syncNow">Back up now</button><button data-act="restore">Restore from code</button></div>
   ${db.codeAck ? '' : `<button class="big" data-act="showCode" style="margin-top:8px;color:var(--warn)">You have not written this code down yet</button>`}</div>
   <div class="card"><b>Data</b><div class="mut small" style="margin:2px 0 8px">${db.sessions.length} workouts saved on this phone.</div>
@@ -594,6 +599,39 @@ setInterval(tick, 250);
 let wl = null;
 async function wake() { try { if (db.active && db.active.start && 'wakeLock' in navigator && !wl) { wl = await navigator.wakeLock.request('screen'); wl.addEventListener('release', () => wl = null); } } catch (e) {} }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { wake(); tick(); } });
+
+// Behave like an app, not a page: no pinch zoom, no double-tap zoom.
+for (const t of ['gesturestart', 'gesturechange', 'gestureend']) document.addEventListener(t, e => e.preventDefault(), { passive: false });
+document.addEventListener('dblclick', e => e.preventDefault(), { passive: false });
+
+// ---------- rest picker ----------
+// A snap wheel instead of +/- buttons: repeated taps on a stepper were landing
+// as double-taps and zooming the page.
+const PITEM = 44;
+const REST_OPTS = Array.from({ length: 40 }, (_, i) => (i + 1) * 15);
+const nearestRest = s => REST_OPTS.reduce((a, b) => Math.abs(b - s) < Math.abs(a - s) ? b : a);
+function pickerHTML(id, sel) {
+  const v = nearestRest(sel);
+  return `<div class="pwrap"><div class="picker" id="${id}" data-v="${v}"><div class="plist">` +
+    REST_OPTS.map(s => `<div class="pitem${s === v ? ' sel' : ''}">${fmtT(s)}</div>`).join('') +
+    `</div></div><div class="pband"></div></div>`;
+}
+function mountPicker(id, onPick) {
+  const el = $('#' + id); if (!el) return;
+  const items = [...el.querySelectorAll('.pitem')];
+  let idx = REST_OPTS.indexOf(+el.dataset.v), settle = null;
+  el.scrollTop = idx * PITEM;
+  el.addEventListener('scroll', () => {
+    const i = Math.max(0, Math.min(items.length - 1, Math.round(el.scrollTop / PITEM)));
+    if (i !== idx) {
+      items[idx].classList.remove('sel'); items[i].classList.add('sel');
+      idx = i; el.dataset.v = REST_OPTS[i];
+      if (navigator.vibrate) navigator.vibrate(5);
+    }
+    if (onPick) { clearTimeout(settle); settle = setTimeout(() => onPick(REST_OPTS[idx]), 160); }
+  }, { passive: true });
+}
+const pickerVal = id => +$('#' + id).dataset.v;
 
 // ---------- sheet + toast ----------
 function sheet(html) { const s = $('#sheet'); s.innerHTML = `<div class="pane">${html}</div>`; s.hidden = false; }
@@ -657,21 +695,19 @@ const act = {
   begin() { beginWorkout(); render(); window.scrollTo(0, 0); },
   toggleBw(b) { const ex = db.active.exercises[b.dataset.i]; ex.bw = !ex.bw; prefill(ex); save(); render(); },
   rest(b) {
-    const ex = db.active.exercises[b.dataset.i]; let v = exRest(ex);
+    const ex = db.active.exercises[b.dataset.i];
     sheet(`<h3>Rest for ${esc(ex.name)}</h3><div class="mut small">${ex.rest != null ? `Set to ${fmtT(ex.rest)} for today only. Usually ${fmtT(restOf(ex.name))}.` : `Usually ${fmtT(restOf(ex.name))}`}</div>
-      <div class="reststep"><button id="rsM">−15</button><span id="rsV">${fmtT(v)}</span><button id="rsP">+15</button></div>
+      ${pickerHTML('rsP', exRest(ex))}
       <button class="big pri" id="rsF">Save</button>
       <div class="mut small" style="text-align:center;margin:6px 0 2px">Applies to this and all future workouts.</div>
       <div class="row" style="margin-top:8px"><button id="rsT" style="background:none;color:var(--acc)">Today only</button><button id="rsX" style="background:none">Cancel</button></div>
       ${ex.rest != null ? `<button class="big" id="rsU" style="margin-top:8px">Back to usual (${fmtT(restOf(ex.name))})</button>` : ''}`);
     if ($('#rsU')) $('#rsU').onclick = () => { delete ex.rest; closeSheet(); save(); render(); toast(`${ex.name}: back to ${fmtT(restOf(ex.name))}`); };
-    const upd = d => { v = Math.max(15, v + d); $('#rsV').textContent = fmtT(v); };
-    $('#rsM').onclick = () => upd(-15); $('#rsP').onclick = () => upd(15);
-    $('#rsT').onclick = () => { ex.rest = v; closeSheet(); save(); render(); toast(`${ex.name}: ${fmtT(v)} rest today`); };
-    $('#rsF').onclick = () => { db.settings.restByEx[key(ex.name)] = v; delete ex.rest; closeSheet(); save(); render(); toast(`${ex.name}: ${fmtT(v)} rest from now on`); };
+    mountPicker('rsP');
+    $('#rsT').onclick = () => { const v = pickerVal('rsP'); ex.rest = v; closeSheet(); save(); render(); toast(`${ex.name}: ${fmtT(v)} rest today`); };
+    $('#rsF').onclick = () => { const v = pickerVal('rsP'); db.settings.restByEx[key(ex.name)] = v; delete ex.rest; closeSheet(); save(); render(); toast(`${ex.name}: ${fmtT(v)} rest from now on`); };
     $('#rsX').onclick = closeSheet;
   },
-  defRest(b) { db.settings.rest = Math.max(15, db.settings.rest + +b.dataset.d); save(); render(); },
   step(b) {
     const s = db.active.exercises[b.dataset.i].sets[b.dataset.s], f = b.dataset.f;
     s[f] = Math.max(0, Math.round((num(s[f]) + +b.dataset.d) * 10) / 10); save(); render();
