@@ -138,6 +138,15 @@ select{font:inherit;color:var(--text);background:var(--bg);border:1px solid var(
   font-size:22px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--mut);transition:color .12s,font-size .12s}
 .pitem.sel{color:var(--text);font-size:32px;font-weight:700}
 .pband{position:absolute;left:0;right:0;top:66px;height:44px;pointer-events:none;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.hwrap{position:relative;width:88px;flex:none}
+.hpick{height:52px;overflow-x:auto;overscroll-behavior:contain;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch;touch-action:pan-x;scrollbar-width:none;
+  -webkit-mask-image:linear-gradient(90deg,#0000,#000 30%,#000 70%,#0000);mask-image:linear-gradient(90deg,#0000,#000 30%,#000 70%,#0000)}
+.hpick::-webkit-scrollbar{display:none}
+.hlist{display:flex;padding:0 22px}
+.hitem{width:44px;flex:none;height:52px;display:flex;align-items:center;justify-content:center;scroll-snap-align:center;
+  font-size:15px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--mut);transition:color .12s,font-size .12s}
+.hitem.sel{color:var(--text);font-size:19px;font-weight:700}
+.hband{position:absolute;left:22px;width:44px;top:0;bottom:0;pointer-events:none;border-left:1px solid var(--line);border-right:1px solid var(--line)}
 </style>
 </head>
 <body>
@@ -581,17 +590,38 @@ function beep() {
 }
 // Ticking a set is starting the workout, whether or not Start got tapped.
 function beginWorkout() { if (db.active && !db.active.start) { db.active.start = Date.now(); save(); wake(); } }
-function startRest(sec, label) { db.timer = { end: Date.now() + sec * 1000, total: sec, label }; firedFor = null; save(); tick(); }
+function startRest(sec, label) { db.timer = { end: Date.now() + sec * 1000, total: sec, label }; firedFor = null; tShell = false; save(); tick(); }
+// The bar is built once per rest and then only its numbers move: rewriting it
+// every 250ms would reset the delta wheel's scroll position mid-flick.
+let tShell = false;
+function buildTimerBar() {
+  const el = $('#timer');
+  el.innerHTML = `<div class="bar"></div><div class="in"><div class="t"><span class="tv"></span><span class="lbl"></span></div>` +
+    deltaHTML() + `<button class="pri" data-act="tStop"></button></div>`;
+  mountDelta(tAdjust);
+  tShell = true;
+}
 function tick() {
   document.querySelectorAll('[data-elapsed]').forEach(el => { el.textContent = !db.active ? '' : db.active.start ? fmtT((Date.now() - db.active.start) / 1000) : 'Not started'; });
   const el = $('#timer'), t = db.timer;
-  if (!t) { el.hidden = true; return; }
+  if (!t) { el.hidden = true; if (tShell) { el.innerHTML = ''; tShell = false; } return; }
   el.hidden = false;
+  if (!tShell || !el.firstChild) buildTimerBar();
   const left = (t.end - Date.now()) / 1000, over = left <= 0;
   if (over && firedFor !== t.end) { firedFor = t.end; beep(); }
   el.classList.toggle('over', over);
-  const pct = over ? 100 : 100 * (1 - left / t.total);
-  el.innerHTML = `<div class="bar" style="width:${pct}%"></div><div class="in"><div class="t">${over ? 'Go' : fmtT(left)}<span class="lbl">${over ? 'Rest done · ' + fmtT(-left) + ' ago' : 'Rest · ' + esc(t.label || '')}</span></div><button data-act="tAdj" data-d="-15">−15</button><button data-act="tAdj" data-d="15">+15</button><button class="pri" data-act="tStop">${over ? 'OK' : 'Skip'}</button></div>`;
+  el.querySelector('.bar').style.width = (over ? 100 : 100 * (1 - left / t.total)) + '%';
+  el.querySelector('.tv').textContent = over ? 'Go' : fmtT(left);
+  el.querySelector('.lbl').textContent = over ? 'Rest done · ' + fmtT(-left) + ' ago' : 'Rest · ' + (t.label || '');
+  el.querySelector('.pri').textContent = over ? 'OK' : 'Skip';
+}
+function tAdjust(d) {
+  const t = db.timer; if (!t) return;
+  const now = Date.now();
+  if (t.end < now) t.end = now;
+  t.end += d * 1000; t.total = Math.max(1, t.total + d);
+  if (t.end <= now) t.end = now;
+  firedFor = null; save(); tick();
 }
 setInterval(tick, 250);
 
@@ -632,6 +662,41 @@ function mountPicker(id, onPick) {
   }, { passive: true });
 }
 const pickerVal = id => +$('#' + id).dataset.v;
+
+// ---------- running-timer delta wheel ----------
+// Same reason as the rest picker: a stepper you tap repeatedly reads as a
+// double-tap. This one spins through offsets and springs back to centre, so a
+// flick means "+30" without ever being a tap target.
+const HDELTAS = [-60, -45, -30, -15, 0, 15, 30, 45, 60], HITEM = 44, HMID = 4;
+function deltaHTML() {
+  return `<div class="hwrap"><div class="hpick" id="tdelta"><div class="hlist">` +
+    HDELTAS.map((d, i) => `<div class="hitem${i === HMID ? ' sel' : ''}">${d > 0 ? '+' + d : d < 0 ? '−' + -d : '·'}</div>`).join('') +
+    `</div></div><div class="hband"></div></div>`;
+}
+function mountDelta(onDelta) {
+  const el = $('#tdelta'); if (!el) return;
+  const items = [...el.querySelectorAll('.hitem')];
+  let idx = HMID, settle = null, lock = false;
+  el.scrollLeft = HITEM * HMID;
+  el.addEventListener('scroll', () => {
+    if (lock) return;
+    const i = Math.max(0, Math.min(items.length - 1, Math.round(el.scrollLeft / HITEM)));
+    if (i !== idx) {
+      items[idx].classList.remove('sel'); items[i].classList.add('sel'); idx = i;
+      if (navigator.vibrate) navigator.vibrate(5);
+    }
+    clearTimeout(settle);
+    // Wait out the momentum before snapping back, or iOS overrides scrollLeft.
+    settle = setTimeout(() => {
+      const d = HDELTAS[idx];
+      if (!d) return;
+      lock = true; setTimeout(() => lock = false, 150);
+      items[idx].classList.remove('sel'); items[HMID].classList.add('sel'); idx = HMID;
+      el.scrollLeft = HITEM * HMID;
+      onDelta(d);
+    }, 220);
+  }, { passive: true });
+}
 
 // ---------- sheet + toast ----------
 function sheet(html) { const s = $('#sheet'); s.innerHTML = `<div class="pane">${html}</div>`; s.hidden = false; }
@@ -720,7 +785,6 @@ const act = {
   },
   addSet(b) { const ex = db.active.exercises[b.dataset.i]; const p = ex.sets[ex.sets.length - 1]; ex.sets.push({ w: p ? p.w : 0, r: p ? p.r : 0, done: false }); ex.setsEdited = true; save(); render(); },
   delSet(b) { const ex = db.active.exercises[b.dataset.i]; const k = ex.sets.map(s => !s.done).lastIndexOf(true); if (k >= 0) ex.sets.splice(k, 1); ex.setsEdited = true; save(); render(); },
-  tAdj(b) { const t = db.timer; if (!t) return; const now = Date.now(); if (t.end < now) t.end = now; t.end += +b.dataset.d * 1000; t.total = Math.max(1, t.total + +b.dataset.d); if (t.end <= now) t.end = now; firedFor = null; save(); tick(); },
   tStop() { db.timer = null; save(); tick(); },
   exMenu(b) {
     const i = +b.dataset.i;
