@@ -70,7 +70,7 @@ h2{font-size:18px;margin:18px 0 8px}
 .set.done .chk{background:var(--good);color:#06210f}
 .set.done .stp{background:var(--done);border-color:#24503a}
 .cmp{grid-column:2/-1;font-size:12px;color:var(--mut);margin-top:-2px}
-.up{color:var(--good);font-weight:700}.down{color:var(--bad);font-weight:700}.eq{color:var(--mut);font-weight:700}.mix{color:var(--warn);font-weight:700}
+.up{color:var(--good);font-weight:700}.down{color:var(--bad);font-weight:700}.eq{color:var(--mut);font-weight:700}
 .rowbtns{display:flex;gap:6px;margin-top:8px}
 .rowbtns button{flex:1;font-size:14px;padding:8px}
 #timer{position:fixed;left:0;right:0;bottom:0;z-index:20;background:#11151d;border-top:1px solid var(--line);padding:10px 12px calc(var(--safe-b) + 10px)}
@@ -138,15 +138,7 @@ select{font:inherit;color:var(--text);background:var(--bg);border:1px solid var(
   font-size:22px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--mut);transition:color .12s,font-size .12s}
 .pitem.sel{color:var(--text);font-size:32px;font-weight:700}
 .pband{position:absolute;left:0;right:0;top:66px;height:44px;pointer-events:none;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
-.hwrap{position:relative;width:88px;flex:none}
-.hpick{height:52px;overflow-x:auto;overscroll-behavior:contain;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch;touch-action:pan-x;scrollbar-width:none;
-  -webkit-mask-image:linear-gradient(90deg,#0000,#000 30%,#000 70%,#0000);mask-image:linear-gradient(90deg,#0000,#000 30%,#000 70%,#0000)}
-.hpick::-webkit-scrollbar{display:none}
-.hlist{display:flex;padding:0 22px}
-.hitem{width:44px;flex:none;height:52px;display:flex;align-items:center;justify-content:center;scroll-snap-align:center;
-  font-size:15px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--mut);transition:color .12s,font-size .12s}
-.hitem.sel{color:var(--text);font-size:19px;font-weight:700}
-.hband{position:absolute;left:22px;width:44px;top:0;bottom:0;pointer-events:none;border-left:1px solid var(--line);border-right:1px solid var(--line)}
+#timer .tadj{width:54px;flex:none;padding:10px 0;font-size:13px;line-height:1.15;font-weight:600;font-variant-numeric:tabular-nums}
 </style>
 </head>
 <body>
@@ -373,14 +365,21 @@ function applyTravel(ex, on, noPrefill) {
   }
   if (!noPrefill) prefill(ex);
 }
+// Heavier for fewer reps is a real question, not a shrug: 105x6 and 100x8 are
+// the same set. So compare estimated one-rep max (Epley) rather than calling
+// any trade mixed, with a small deadband so arithmetic noise reads as a match.
+const e1rm = s => s.w * (1 + s.r / 30);
 function cmp(s, l, bw) {
   if (!l) return null;
-  if (bw || (!(s.w > 0) && !(l.w > 0))) return s.r > l.r ? 'up' : s.r < l.r ? 'down' : 'eq';
-  if (s.w === l.w) return s.r > l.r ? 'up' : s.r < l.r ? 'down' : 'eq';
-  if (s.w > l.w) return s.r >= l.r ? 'up' : 'mix';
-  return s.r <= l.r ? 'down' : 'mix';
+  const reps = () => s.r > l.r ? 'up' : s.r < l.r ? 'down' : 'eq';
+  if (bw || (!(s.w > 0) && !(l.w > 0))) return reps();
+  if (!(s.w > 0) || !(l.w > 0)) return null; // loaded against unloaded says nothing
+  if (s.w === l.w) return reps();            // same bar: a rep gained always counts
+  const a = e1rm(s), b = e1rm(l);
+  if (Math.abs(a - b) <= b * .015) return 'eq';
+  return a > b ? 'up' : 'down';
 }
-const SYM = { up: '▲', down: '▼', eq: '=', mix: '~' };
+const SYM = { up: '▲', down: '▼', eq: '=' };
 
 // ---------- views ----------
 let view = 'home', openSess = null;
@@ -592,13 +591,14 @@ function beep() {
 function beginWorkout() { if (db.active && !db.active.start) { db.active.start = Date.now(); save(); wake(); } }
 function startRest(sec, label) { db.timer = { end: Date.now() + sec * 1000, total: sec, label }; firedFor = null; tShell = false; save(); tick(); }
 // The bar is built once per rest and then only its numbers move: rewriting it
-// every 250ms would reset the delta wheel's scroll position mid-flick.
+// every 250ms would steal the press off a button mid-tap.
 let tShell = false;
 function buildTimerBar() {
   const el = $('#timer');
-  el.innerHTML = `<div class="bar"></div><div class="in"><div class="t"><span class="tv"></span><span class="lbl"></span></div>` +
-    deltaHTML() + `<button class="pri" data-act="tStop"></button></div>`;
-  mountDelta(tAdjust);
+  el.innerHTML = `<div class="bar"></div><div class="in"><div class="t"><span class="tv"></span><span class="lbl"></span></div>
+    <button class="tadj" data-act="tDelta" data-d="-15">−15<br>sec</button>
+    <button class="tadj" data-act="tDelta" data-d="15">+15<br>sec</button>
+    <button class="pri" data-act="tStop"></button></div>`;
   tShell = true;
 }
 function tick() {
@@ -662,41 +662,6 @@ function mountPicker(id, onPick) {
   }, { passive: true });
 }
 const pickerVal = id => +$('#' + id).dataset.v;
-
-// ---------- running-timer delta wheel ----------
-// Same reason as the rest picker: a stepper you tap repeatedly reads as a
-// double-tap. This one spins through offsets and springs back to centre, so a
-// flick means "+30" without ever being a tap target.
-const HDELTAS = [-60, -45, -30, -15, 0, 15, 30, 45, 60], HITEM = 44, HMID = 4;
-function deltaHTML() {
-  return `<div class="hwrap"><div class="hpick" id="tdelta"><div class="hlist">` +
-    HDELTAS.map((d, i) => `<div class="hitem${i === HMID ? ' sel' : ''}">${d > 0 ? '+' + d : d < 0 ? '−' + -d : '·'}</div>`).join('') +
-    `</div></div><div class="hband"></div></div>`;
-}
-function mountDelta(onDelta) {
-  const el = $('#tdelta'); if (!el) return;
-  const items = [...el.querySelectorAll('.hitem')];
-  let idx = HMID, settle = null, lock = false;
-  el.scrollLeft = HITEM * HMID;
-  el.addEventListener('scroll', () => {
-    if (lock) return;
-    const i = Math.max(0, Math.min(items.length - 1, Math.round(el.scrollLeft / HITEM)));
-    if (i !== idx) {
-      items[idx].classList.remove('sel'); items[i].classList.add('sel'); idx = i;
-      if (navigator.vibrate) navigator.vibrate(5);
-    }
-    clearTimeout(settle);
-    // Wait out the momentum before snapping back, or iOS overrides scrollLeft.
-    settle = setTimeout(() => {
-      const d = HDELTAS[idx];
-      if (!d) return;
-      lock = true; setTimeout(() => lock = false, 150);
-      items[idx].classList.remove('sel'); items[HMID].classList.add('sel'); idx = HMID;
-      el.scrollLeft = HITEM * HMID;
-      onDelta(d);
-    }, 220);
-  }, { passive: true });
-}
 
 // ---------- sheet + toast ----------
 function sheet(html) { const s = $('#sheet'); s.innerHTML = `<div class="pane">${html}</div>`; s.hidden = false; }
@@ -786,6 +751,7 @@ const act = {
   addSet(b) { const ex = db.active.exercises[b.dataset.i]; const p = ex.sets[ex.sets.length - 1]; ex.sets.push({ w: p ? p.w : 0, r: p ? p.r : 0, done: false }); ex.setsEdited = true; save(); render(); },
   delSet(b) { const ex = db.active.exercises[b.dataset.i]; const k = ex.sets.map(s => !s.done).lastIndexOf(true); if (k >= 0) ex.sets.splice(k, 1); ex.setsEdited = true; save(); render(); },
   tStop() { db.timer = null; save(); tick(); },
+  tDelta(b) { tAdjust(+b.dataset.d); },
   exMenu(b) {
     const i = +b.dataset.i;
     sheet(`<h3>${esc(db.active.exercises[i].name)}</h3><div class="list">
