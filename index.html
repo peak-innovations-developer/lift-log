@@ -554,7 +554,8 @@ function niceStep(r) { const raw = r / 4, p = Math.pow(10, Math.floor(Math.log10
 function vSettings() {
   return `<div class="top"><button data-act="nav" data-v="home">‹ Home</button><h1 style="font-size:20px">Settings</h1><span style="width:60px"></span></div>
   <div class="card"><b>Default rest</b><div class="mut small" style="margin:2px 0 8px">Used for any exercise you haven't set its own rest on.</div>
-  ${pickerHTML('defRestP', db.settings.rest)}</div>
+  ${pickerHTML('defRestP', db.settings.rest)}
+  <button data-act="testBeep">Test the alarm</button></div>
   <div class="card"><b>Travel swaps</b><div class="mut small" style="margin:2px 0 8px">Remembered when you swap a weights exercise in travel mode.</div>
   ${Object.keys(db.settings.subs).length ? Object.entries(db.settings.subs).map(([k, v]) => `<div class="row" style="align-items:center;margin:4px 0"><span>${esc(canonFromKey(k))} → ${esc(v)}</span><button style="flex:none" data-act="delSub" data-k="${esc(k)}">✕</button></div>`).join('') : '<div class="mut small">None yet</div>'}</div>
   <div class="card"><b>Automatic backup</b><div class="mut small" id="syncLine" style="margin:2px 0 8px">${esc(syncLabel())}</div>
@@ -575,21 +576,50 @@ function codeSheet() {
 function canonFromKey(k) { return allNames().find(n => n.toLowerCase() === k) || k; }
 
 // ---------- timer ----------
-let ac, firedFor = null;
+let ac, firedFor = null, armed = [], lastArm = 0;
 function primeAudio() {
-  try { if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)(); if (ac.state === 'suspended') ac.resume(); } catch (e) {}
-}
-function beep() {
   try {
-    if (!ac) return; const t0 = ac.currentTime;
-    [0, .25, .5].forEach((d, i) => { const o = ac.createOscillator(), g = ac.createGain(); o.frequency.value = i === 2 ? 1320 : 880; o.connect(g); g.connect(ac.destination);
-      g.gain.setValueAtTime(.0001, t0 + d); g.gain.exponentialRampToValueAtTime(.4, t0 + d + .02); g.gain.exponentialRampToValueAtTime(.0001, t0 + d + .2); o.start(t0 + d); o.stop(t0 + d + .22); });
+    if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)();
+    if (ac.state === 'suspended') ac.resume();
   } catch (e) {}
-  try { navigator.vibrate && navigator.vibrate([200, 100, 200]); } catch (e) {}
+  return ac;
+}
+// Three notes placed on the audio clock, possibly minutes out. Scheduling ahead
+// is the point: setInterval gets throttled to a crawl once the app is not
+// frontmost, so an alarm fired from the tick arrives late or not at all.
+function beepAt(ctx, t0) {
+  [0, .25, .5].forEach((d, i) => {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.frequency.value = i === 2 ? 1320 : 880; o.connect(g); g.connect(ctx.destination);
+    g.gain.setValueAtTime(.0001, t0 + d); g.gain.exponentialRampToValueAtTime(.4, t0 + d + .02);
+    g.gain.exponentialRampToValueAtTime(.0001, t0 + d + .2);
+    o.start(t0 + d); o.stop(t0 + d + .22);
+    armed.push(o);
+  });
+}
+function disarm() { armed.forEach(o => { try { o.stop(); } catch (e) {} }); armed = []; }
+// Queue the alarm for the end of the current rest. Called when a rest starts,
+// after every adjustment, and on coming back to the app — a context that was
+// suspended in the background forgets what was queued on it.
+function armAlarm() {
+  disarm();
+  const t = db.timer; if (!t) return;
+  if (t.end <= Date.now() && firedFor === t.end) return; // already rung for this one
+  const ctx = primeAudio();
+  if (!ctx) { firedFor = t.end; return; } // no Web Audio at all: stop trying
+  const go = () => {
+    if (db.timer !== t) return;
+    firedFor = t.end;
+    const inS = Math.max(0, (t.end - Date.now()) / 1000);
+    try { beepAt(ctx, ctx.currentTime + inS); } catch (e) {}
+    try { if (navigator.vibrate) setTimeout(() => navigator.vibrate([200, 100, 200]), inS * 1000); } catch (e) {}
+  };
+  if (ctx.state === 'running') go();
+  else if (ctx.resume) ctx.resume().then(go, () => {});
 }
 // Ticking a set is starting the workout, whether or not Start got tapped.
 function beginWorkout() { if (db.active && !db.active.start) { db.active.start = Date.now(); save(); wake(); } }
-function startRest(sec, label) { db.timer = { end: Date.now() + sec * 1000, total: sec, label }; firedFor = null; tShell = false; save(); tick(); }
+function startRest(sec, label) { db.timer = { end: Date.now() + sec * 1000, total: sec, label }; firedFor = null; tShell = false; save(); armAlarm(); tick(); }
 // The bar is built once per rest and then only its numbers move: rewriting it
 // every 250ms would steal the press off a button mid-tap.
 let tShell = false;
@@ -608,7 +638,9 @@ function tick() {
   el.hidden = false;
   if (!tShell || !el.firstChild) buildTimerBar();
   const left = (t.end - Date.now()) / 1000, over = left <= 0;
-  if (over && firedFor !== t.end) { firedFor = t.end; beep(); }
+  // Only reached when arming failed — a context still waiting on a tap to
+  // resume. Retry about once a second rather than on every tick.
+  if (over && firedFor !== t.end && Date.now() - lastArm > 1000) { lastArm = Date.now(); armAlarm(); }
   el.classList.toggle('over', over);
   el.querySelector('.bar').style.width = (over ? 100 : 100 * (1 - left / t.total)) + '%';
   el.querySelector('.tv').textContent = over ? 'Go' : fmtT(left);
@@ -621,14 +653,14 @@ function tAdjust(d) {
   if (t.end < now) t.end = now;
   t.end += d * 1000; t.total = Math.max(1, t.total + d);
   if (t.end <= now) t.end = now;
-  firedFor = null; save(); tick();
+  firedFor = null; save(); armAlarm(); tick();
 }
 setInterval(tick, 250);
 
 // wake lock keeps the screen on during a workout
 let wl = null;
 async function wake() { try { if (db.active && db.active.start && 'wakeLock' in navigator && !wl) { wl = await navigator.wakeLock.request('screen'); wl.addEventListener('release', () => wl = null); } } catch (e) {} }
-document.addEventListener('visibilitychange', () => { if (!document.hidden) { wake(); tick(); } });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { wake(); armAlarm(); tick(); } });
 
 // Behave like an app, not a page: no pinch zoom, no double-tap zoom.
 for (const t of ['gesturestart', 'gesturechange', 'gestureend']) document.addEventListener(t, e => e.preventDefault(), { passive: false });
@@ -750,8 +782,9 @@ const act = {
   },
   addSet(b) { const ex = db.active.exercises[b.dataset.i]; const p = ex.sets[ex.sets.length - 1]; ex.sets.push({ w: p ? p.w : 0, r: p ? p.r : 0, done: false }); ex.setsEdited = true; save(); render(); },
   delSet(b) { const ex = db.active.exercises[b.dataset.i]; const k = ex.sets.map(s => !s.done).lastIndexOf(true); if (k >= 0) ex.sets.splice(k, 1); ex.setsEdited = true; save(); render(); },
-  tStop() { db.timer = null; save(); tick(); },
+  tStop() { disarm(); db.timer = null; save(); tick(); },
   tDelta(b) { tAdjust(+b.dataset.d); },
+  testBeep() { const ctx = primeAudio(); if (ctx) try { beepAt(ctx, ctx.currentTime + .05); } catch (e) {} toast('Heard nothing? Check the ringer switch.'); },
   exMenu(b) {
     const i = +b.dataset.i;
     sheet(`<h3>${esc(db.active.exercises[i].name)}</h3><div class="list">
