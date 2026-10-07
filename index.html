@@ -616,7 +616,7 @@ function codeSheet() {
 function canonFromKey(k) { return allNames().find(n => n.toLowerCase() === k) || k; }
 
 // ---------- timer ----------
-let ac, firedFor = null, armed = [], lastArm = 0;
+let ac, firedFor = null, armedFor = null, armDue = 0, armed = [], tries = 0;
 function primeAudio() {
   try {
     // 'transient' is the session type for a short alert: it plays on top of
@@ -633,7 +633,7 @@ function primeAudio() {
 // ahead is the point, since setInterval gets throttled to a crawl once the app
 // is not frontmost and an alarm fired from the tick arrives late or never.
 const NOTES = [[0, 1047], [.2, 1047], [.4, 1047], [.68, 1319], [.88, 1319], [1.08, 1319]];
-function beepAt(ctx, t0) {
+function beepAt(ctx, t0, onDone) {
   for (const [d, hz] of NOTES) {
     const o = ctx.createOscillator(), g = ctx.createGain();
     o.type = 'square'; o.frequency.value = hz;
@@ -643,32 +643,52 @@ function beepAt(ctx, t0) {
     g.gain.setValueAtTime(.8, t0 + d + .13);
     g.gain.exponentialRampToValueAtTime(.0001, t0 + d + .17);
     o.start(t0 + d); o.stop(t0 + d + .18);
+    if (onDone && d === NOTES[NOTES.length - 1][0]) o.onended = onDone;
     armed.push(o);
   }
 }
-function disarm() { armed.forEach(o => { try { o.stop(); } catch (e) {} }); armed = []; }
-// Queue the alarm for the end of the current rest. Called when a rest starts,
-// after every adjustment, and on coming back to the app — a context that was
-// suspended in the background forgets what was queued on it.
-function armAlarm() {
-  disarm();
-  const t = db.timer; if (!t) return;
-  if (t.end <= Date.now() && firedFor === t.end) return; // already rung for this one
+function disarm() { armed.forEach(o => { try { o.onended = null; o.stop(); } catch (e) {} }); armed = []; armedFor = null; }
+// Placing the notes two minutes out on the audio clock did not survive on
+// iOS: WebKit suspends a context that has gone quiet and the queue goes with
+// it. So they are placed only in the last couple of seconds, with the context
+// resumed right before — a short window with nothing to lose.
+const LEAD = 2;
+// And armed is not rang. The oscillator's own onended is the only honest
+// evidence it sounded. Taking arming as proof was the other half of the bug:
+// a rest whose alarm got swallowed was marked rung by a beep nobody heard, so
+// the retry below never ran and coming back to the app was silent too.
+function alarmTick() {
+  const t = db.timer;
+  if (!t) { if (armed.length) disarm(); return; }
+  if (firedFor === t.end) return;
+  const left = (t.end - Date.now()) / 1000;
+  if (armedFor === t.end) {
+    // Each attempt gets its own deadline. Measuring from the end of the rest
+    // instead would call a burst overdue before it had finished playing, and
+    // then make every retry instantly overdue on top of that.
+    if (Date.now() > armDue) { disarm(); if (++tries >= 3) firedFor = t.end; }
+    return;
+  }
+  if (left > LEAD) return;
   const ctx = primeAudio();
   if (!ctx) { firedFor = t.end; return; } // no Web Audio at all: stop trying
-  const go = () => {
-    if (db.timer !== t) return;
-    firedFor = t.end;
+  const place = () => {
+    if (!db.timer || db.timer.end !== t.end || ctx.state !== 'running') return; // next tick tries again
     const inS = Math.max(0, (t.end - Date.now()) / 1000);
-    try { beepAt(ctx, ctx.currentTime + inS); } catch (e) {}
+    armedFor = t.end;
+    // The last note starts 1.08s after the first and runs 0.18s; allow for all
+    // of that plus slack before concluding nothing came out.
+    armDue = Date.now() + inS * 1000 + 2500;
+    try { beepAt(ctx, ctx.currentTime + inS, () => { firedFor = t.end; }); } catch (e) { armedFor = null; }
     try { if (navigator.vibrate) setTimeout(() => navigator.vibrate([180, 90, 180, 90, 180]), inS * 1000); } catch (e) {}
   };
-  if (ctx.state === 'running') go();
-  else if (ctx.resume) ctx.resume().then(go, () => {});
+  if (ctx.state === 'running') place();
+  else if (ctx.resume) ctx.resume().then(place, () => {});
 }
+
 // Ticking a set is starting the workout, whether or not Start got tapped.
 function beginWorkout() { if (db.active && !db.active.start) { db.active.start = Date.now(); save(); wake(); } }
-function startRest(sec, label) { db.timer = { end: Date.now() + sec * 1000, total: sec, label }; firedFor = null; tShell = false; save(); armAlarm(); tick(); }
+function startRest(sec, label) { db.timer = { end: Date.now() + sec * 1000, total: sec, label }; firedFor = null; tries = 0; disarm(); tShell = false; save(); tick(); }
 // The bar is built once per rest and then only its numbers move: rewriting it
 // every 250ms would steal the press off a button mid-tap.
 let tShell = false;
@@ -687,9 +707,7 @@ function tick() {
   el.hidden = false;
   if (!tShell || !el.firstChild) buildTimerBar();
   const left = (t.end - Date.now()) / 1000, over = left <= 0;
-  // Only reached when arming failed — a context still waiting on a tap to
-  // resume. Retry about once a second rather than on every tick.
-  if (over && firedFor !== t.end && Date.now() - lastArm > 1000) { lastArm = Date.now(); armAlarm(); }
+  alarmTick();
   el.classList.toggle('over', over);
   el.querySelector('.bar').style.width = (over ? 100 : 100 * (1 - left / t.total)) + '%';
   el.querySelector('.tv').textContent = over ? 'Go' : fmtT(left);
@@ -702,14 +720,14 @@ function tAdjust(d) {
   if (t.end < now) t.end = now;
   t.end += d * 1000; t.total = Math.max(1, t.total + d);
   if (t.end <= now) t.end = now;
-  firedFor = null; save(); armAlarm(); tick();
+  firedFor = null; tries = 0; disarm(); save(); tick();
 }
 setInterval(tick, 250);
 
 // wake lock keeps the screen on during a workout
 let wl = null;
 async function wake() { try { if (db.active && db.active.start && 'wakeLock' in navigator && !wl) { wl = await navigator.wakeLock.request('screen'); wl.addEventListener('release', () => wl = null); } } catch (e) {} }
-document.addEventListener('visibilitychange', () => { if (!document.hidden) { wake(); armAlarm(); tick(); } });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { wake(); tick(); } });
 
 // Behave like an app, not a page: no pinch zoom, no double-tap zoom.
 for (const t of ['gesturestart', 'gesturechange', 'gestureend']) document.addEventListener(t, e => e.preventDefault(), { passive: false });
