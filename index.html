@@ -579,23 +579,32 @@ function canonFromKey(k) { return allNames().find(n => n.toLowerCase() === k) ||
 let ac, firedFor = null, armed = [], lastArm = 0;
 function primeAudio() {
   try {
+    // 'transient' is the session type for a short alert: it plays on top of
+    // whatever you are listening to, ducking it, instead of pausing it the way
+    // 'playback' would. The default, 'ambient', just mixes in underneath.
+    if (navigator.audioSession) navigator.audioSession.type = 'transient';
     if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)();
     if (ac.state === 'suspended') ac.resume();
   } catch (e) {}
   return ac;
 }
-// Three notes placed on the audio clock, possibly minutes out. Scheduling ahead
-// is the point: setInterval gets throttled to a crawl once the app is not
-// frontmost, so an alarm fired from the tick arrives late or not at all.
+// Two triplets, a square wave near full gain: this has to carry across a gym
+// and over music. Placed on the audio clock, possibly minutes out — scheduling
+// ahead is the point, since setInterval gets throttled to a crawl once the app
+// is not frontmost and an alarm fired from the tick arrives late or never.
+const NOTES = [[0, 1047], [.2, 1047], [.4, 1047], [.68, 1319], [.88, 1319], [1.08, 1319]];
 function beepAt(ctx, t0) {
-  [0, .25, .5].forEach((d, i) => {
+  for (const [d, hz] of NOTES) {
     const o = ctx.createOscillator(), g = ctx.createGain();
-    o.frequency.value = i === 2 ? 1320 : 880; o.connect(g); g.connect(ctx.destination);
-    g.gain.setValueAtTime(.0001, t0 + d); g.gain.exponentialRampToValueAtTime(.4, t0 + d + .02);
-    g.gain.exponentialRampToValueAtTime(.0001, t0 + d + .2);
-    o.start(t0 + d); o.stop(t0 + d + .22);
+    o.type = 'square'; o.frequency.value = hz;
+    o.connect(g); g.connect(ctx.destination);
+    g.gain.setValueAtTime(.0001, t0 + d);
+    g.gain.exponentialRampToValueAtTime(.8, t0 + d + .01);
+    g.gain.setValueAtTime(.8, t0 + d + .13);
+    g.gain.exponentialRampToValueAtTime(.0001, t0 + d + .17);
+    o.start(t0 + d); o.stop(t0 + d + .18);
     armed.push(o);
-  });
+  }
 }
 function disarm() { armed.forEach(o => { try { o.stop(); } catch (e) {} }); armed = []; }
 // Queue the alarm for the end of the current rest. Called when a rest starts,
@@ -612,7 +621,7 @@ function armAlarm() {
     firedFor = t.end;
     const inS = Math.max(0, (t.end - Date.now()) / 1000);
     try { beepAt(ctx, ctx.currentTime + inS); } catch (e) {}
-    try { if (navigator.vibrate) setTimeout(() => navigator.vibrate([200, 100, 200]), inS * 1000); } catch (e) {}
+    try { if (navigator.vibrate) setTimeout(() => navigator.vibrate([180, 90, 180, 90, 180]), inS * 1000); } catch (e) {}
   };
   if (ctx.state === 'running') go();
   else if (ctx.resume) ctx.resume().then(go, () => {});
