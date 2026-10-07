@@ -382,11 +382,12 @@ function cmp(s, l, bw) {
 const SYM = { up: '▲', down: '▼', eq: '=' };
 
 // ---------- views ----------
-let view = 'home', openSess = null;
+let view = 'home', openSess = null, editing = null, editWas = '';
 function render() {
   const app = $('#app');
   if (view === 'workout' && db.active) app.innerHTML = vWorkout();
   else if (view === 'history') app.innerHTML = vHistory();
+  else if (view === 'edit' && editing) app.innerHTML = vEdit();
   else if (view === 'settings') app.innerHTML = vSettings();
   else { view = 'home'; app.innerHTML = vHome(); }
   if (view === 'settings') mountPicker('defRestP', v => { db.settings.rest = v; save(); });
@@ -456,8 +457,47 @@ const dayKey = t => { const d = new Date(t); return d.getFullYear() + '-' + (d.g
 function sessCard(s, open) {
   let h = `<div class="card sess" data-act="openSess" data-id="${s.id}"><div class="d"><b><span class="dot" style="background:${wkColor(s.name)}"></span>${esc(s.name)}</b><span class="mut small">${fmtD(s.end)} · ${Math.round((s.end - s.start) / 60000)} min</span></div>`;
   if (!open) h += `<div class="ex">${s.exercises.map(e => esc(e.name)).join(', ')}</div>`;
-  else h += `<div class="detail">${s.exercises.map(e => { const bw = isBwSession(e.sets); return `<div><b>${esc(e.name)}</b> <span class="mut">${bw && kindOf(e.name) === 'addon' ? '(bw) ' : ''}${setsText(e.sets, bw)}</span></div>`; }).join('')}</div><button class="danger" style="margin-top:8px" data-act="delSess" data-id="${s.id}">Delete</button>`;
+  else h += `<div class="detail">${s.exercises.map(e => { const bw = isBwSession(e.sets); return `<div><b>${esc(e.name)}</b> <span class="mut">${bw && kindOf(e.name) === 'addon' ? '(bw) ' : ''}${setsText(e.sets, bw)}</span></div>`; }).join('')}</div><div class="rowbtns"><button data-act="editSess" data-id="${s.id}">Edit</button><button class="danger" data-act="delSess" data-id="${s.id}">Delete</button></div>`;
   return h + `</div>`;
+}
+// ---------- editing a finished workout ----------
+// All of this works on a copy. A workout you have already walked away from is
+// the one thing in here you cannot recover by doing it again, so Cancel has to
+// actually cancel, and nothing touches db.sessions until Save.
+function startEdit(id) {
+  const s = db.sessions.find(x => x.id === id); if (!s) return;
+  editing = JSON.parse(JSON.stringify(s));
+  editWas = JSON.stringify(editing);
+  view = 'edit'; openSess = null; render(); window.scrollTo(0, 0);
+}
+const dateVal = t => { const d = new Date(t); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
+function vEdit() {
+  readEditFields();
+  const s = editing;
+  let h = `<div class="top"><button data-act="eCancel">\u2039 Cancel</button><h1 style="font-size:20px">Edit workout</h1><span style="width:60px"></span></div>`;
+  h += `<div class="card"><b>Name</b><input id="eName" value="${esc(s.name)}" style="margin-top:6px">
+    <b style="display:block;margin-top:10px">Date</b><input id="eDate" type="date" value="${dateVal(s.end)}" style="margin-top:6px">
+    <div class="mut small" style="margin-top:6px">${Math.round((s.end - s.start) / 60000)} min</div></div>`;
+  s.exercises.forEach((ex, i) => {
+    h += `<div class="card"><div class="exh"><span class="exname">${esc(ex.name)}</span><div class="chips">
+      <button class="chip" data-act="eExMenu" data-i="${i}" aria-label="Exercise options">\u22ef</button></div></div>`;
+    ex.sets.forEach((x, j) => h += vESet(ex, i, x, j));
+    h += `<div class="rowbtns"><button data-act="eAddSet" data-i="${i}">+ Set</button></div></div>`;
+  });
+  h += `<button class="big" data-act="eAddEx">+ Add exercise</button>`;
+  h += `<div class="wfoot"><button data-act="eCancel">Cancel</button><button class="pri" data-act="eSave">Save</button></div>`;
+  return h;
+}
+// Bodyweight is not stored on a saved set, it is read back off the numbers
+// (w === 0). So the weight field hides only for a bodyweight lift that was
+// logged without any — kindOf() defaults to 'bw' for a name whose type was
+// never recorded, and those are exactly the imported rows that do have weight.
+function vESet(ex, i, s, j) {
+  const kind = kindOf(ex.name), noW = kind === 'bw' && isBwSession(ex.sets);
+  const stp = (f, d, unit, mode) => `<div class="stp"><button data-act="eStep" data-i="${i}" data-s="${j}" data-f="${f}" data-d="-${d}">\u2212</button><input data-edit="1" data-i="${i}" data-s="${j}" data-f="${f}" inputmode="${mode}" value="${s[f]}"><span class="u">${unit}</span><button data-act="eStep" data-i="${i}" data-s="${j}" data-f="${f}" data-d="${d}">+</button></div>`;
+  return `<div class="set ${noW ? 'bwset' : ''}" data-i="${i}" data-s="${j}"><div class="sn">${j + 1}</div>` +
+    (noW ? '' : stp('w', 5, kind === 'addon' ? '+lb' : 'lb', 'decimal')) + stp('r', 1, 'reps', 'numeric') +
+    `<button class="chk" data-act="eDelSet" data-i="${i}" data-s="${j}" aria-label="Delete set">\u2715</button></div>`;
 }
 function vHistory() {
   let h = `<div class="top"><button data-act="nav" data-v="home">‹ Home</button><h1 style="font-size:20px">History</h1><span style="width:60px"></span></div>`;
@@ -741,9 +781,21 @@ function pickExerciseSheet(title, onPick, preferBw) {
   });
 }
 
+// The name and date inputs are rebuilt on every render (a stepper tap renders),
+// so they are read into the copy before anything that could discard them.
+function readEditFields() {
+  if (!editing) return;
+  const n = $('#eName'), d = $('#eDate');
+  if (n && n.value.trim()) editing.name = n.value.trim();
+  if (d && d.value) {
+    const [y, mo, da] = d.value.split('-').map(Number), dur = editing.end - editing.start;
+    const e = new Date(editing.end); e.setFullYear(y, mo - 1, da);
+    editing.end = e.getTime(); editing.start = editing.end - dur;
+  }
+}
 // ---------- actions ----------
 const act = {
-  nav(b) { view = b.dataset.v; openSess = null; render(); window.scrollTo(0, 0); },
+  nav(b) { view = b.dataset.v; openSess = null; editing = null; render(); window.scrollTo(0, 0); },
   dismissImport() { db.imported = true; save(); render(); },
   travel() {
     db.settings.travel = !db.settings.travel;
@@ -893,7 +945,7 @@ const act = {
     if (!sure && !(await ask('Discard this workout? Nothing will be saved.', 'Discard', true))) return;
     db.active = null; db.timer = null; save(); view = 'home'; render();
   },
-  hTab(b) { hs.tab = b.dataset.v; hs.pt = null; openSess = null; render(); },
+  hTab(b) { hs.tab = b.dataset.v; hs.pt = null; openSess = null; editing = null; render(); },
   calNav(b) { let [y, m] = hs.ym; m += +b.dataset.d; if (m < 0) { m = 11; y--; } if (m > 11) { m = 0; y++; } hs.ym = [y, m]; hs.day = null; render(); },
   calDay(b) { hs.day = hs.day === b.dataset.k ? null : b.dataset.k; render(); },
   pBw(b) { hs.bw = b.dataset.v === '1'; hs.pt = null; render(); },
@@ -901,6 +953,53 @@ const act = {
   pPt(b) { hs.pt = +b.dataset.k; render(); },
   openSess(b, e) { if (e.target.closest('[data-act="delSess"]')) return; openSess = openSess === b.dataset.id ? null : b.dataset.id; render(); },
   async delSess(b) { if (!(await ask('Delete this workout from history?', 'Delete', true))) return; db.sessions = db.sessions.filter(s => s.id !== b.dataset.id); save(); render(); },
+  editSess(b) { startEdit(b.dataset.id); },
+  eStep(b) {
+    const x = editing.exercises[b.dataset.i].sets[b.dataset.s], f = b.dataset.f;
+    x[f] = Math.max(0, Math.round((num(x[f]) + +b.dataset.d) * 10) / 10); render();
+  },
+  eAddSet(b) { const ex = editing.exercises[b.dataset.i], p = ex.sets[ex.sets.length - 1]; ex.sets.push({ w: p ? p.w : 0, r: p ? p.r : 0 }); render(); },
+  // An exercise with no sets left is not an exercise you did.
+  eDelSet(b) { const ex = editing.exercises[b.dataset.i]; ex.sets.splice(+b.dataset.s, 1); if (!ex.sets.length) editing.exercises.splice(+b.dataset.i, 1); render(); },
+  eExMenu(b) {
+    const i = +b.dataset.i;
+    sheet(`<h3>${esc(editing.exercises[i].name)}</h3><div class="list">
+      <button data-act="eSwapEx" data-i="${i}">Change which exercise this was\u2026</button>
+      <button data-act="eMove" data-i="${i}" data-d="-1">Move up</button>
+      <button data-act="eMove" data-i="${i}" data-d="1">Move down</button>
+      <button class="danger" data-act="eDelEx" data-i="${i}">Remove from this workout</button></div>`);
+  },
+  eSwapEx(b) {
+    const ex = editing.exercises[+b.dataset.i];
+    pickExerciseSheet(`This was\u2026`, n => { ex.name = canon(n); render(); });
+  },
+  eMove(b) {
+    const i = +b.dataset.i, j = i + +b.dataset.d, a = editing.exercises;
+    if (j < 0 || j >= a.length) return closeSheet();
+    [a[i], a[j]] = [a[j], a[i]]; closeSheet(); render();
+  },
+  eDelEx(b) { editing.exercises.splice(+b.dataset.i, 1); closeSheet(); render(); },
+  eAddEx() { pickExerciseSheet('Add exercise', n => { editing.exercises.push({ name: canon(n), sets: [{ w: 0, r: 0 }] }); render(); window.scrollTo(0, document.body.scrollHeight); }); },
+  eSave() {
+    readEditFields();
+    const s = editing;
+    s.exercises = s.exercises.map(e => ({ name: e.name, sets: e.sets.map(x => ({ w: num(x.w), r: num(x.r) })) })).filter(e => e.sets.length);
+    if (!s.exercises.length) return toast('Nothing left in it \u2014 delete the workout instead');
+    const i = db.sessions.findIndex(x => x.id === s.id);
+    if (i < 0) { editing = null; view = 'history'; render(); return toast('That workout is no longer here'); }
+    db.sessions[i] = s;
+    // Everything that reads history walks it oldest-first, so a changed date
+    // has to actually move the workout, not just relabel it.
+    db.sessions.sort((a, b) => a.end - b.end);
+    // Land back on the workout, even if the date change moved which day it is on.
+    hs.day = dayKey(s.end); hs.ym = [new Date(s.end).getFullYear(), new Date(s.end).getMonth()];
+    editing = null; save(); view = 'history'; openSess = s.id; render(); toast('Saved');
+  },
+  async eCancel() {
+    readEditFields();
+    if (JSON.stringify(editing) !== editWas && !(await ask('Throw away these changes?', 'Discard', true))) return;
+    editing = null; view = 'history'; render();
+  },
   tmplMenu(b) {
     const t = db.templates.find(x => x.id === b.dataset.id);
     sheet(`<h3>${esc(t.name)}</h3><div class="mut small" style="margin-bottom:8px">${t.ex.map(e => esc(e.name)).join(', ')}</div><div class="list">
@@ -939,14 +1038,25 @@ document.addEventListener('click', e => {
 });
 document.addEventListener('change', e => { if (e.target.id === 'progEx') { hs.ex = e.target.value; hs.pt = null; const k = kindOf(hs.ex); hs.bw = k === 'bw'; render(); } });
 document.addEventListener('focusin', e => { if (e.target.matches('.stp input')) setTimeout(() => e.target.select(), 0); });
+// A set row looks the same whether it is today's workout or a finished one
+// being corrected; data-edit says which object the number belongs to.
+const setFor = el => {
+  const host = el.dataset.edit ? editing : db.active;
+  const ex = host && host.exercises[el.dataset.i];
+  return ex && ex.sets[el.dataset.s];
+};
 document.addEventListener('change', e => {
-  const el = e.target; if (!el.matches('.stp input') || !db.active) return;
-  const s = db.active.exercises[el.dataset.i].sets[el.dataset.s];
-  s[el.dataset.f] = Math.max(0, num(el.value)); save(); render();
+  const el = e.target; if (!el.matches('.stp input')) return;
+  const s = setFor(el); if (!s) return;
+  s[el.dataset.f] = Math.max(0, num(el.value));
+  if (!el.dataset.edit) save();
+  render();
 });
 document.addEventListener('input', e => {
-  const el = e.target; if (!el.matches('.stp input') || !db.active) return;
-  db.active.exercises[el.dataset.i].sets[el.dataset.s][el.dataset.f] = Math.max(0, num(el.value)); save();
+  const el = e.target; if (!el.matches('.stp input')) return;
+  const s = setFor(el); if (!s) return;
+  s[el.dataset.f] = Math.max(0, num(el.value));
+  if (!el.dataset.edit) save();
 });
 
 // ---------- CSV import / export ----------
