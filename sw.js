@@ -13,12 +13,20 @@ self.addEventListener('fetch', e => {
 
 // The rest alarm, sent by the server when the rest ends (see the alarm code in
 // index.html). It has to show a notification every time: iOS revokes push for
-// an app that receives one and shows nothing. The tag keeps one on screen.
+// an app that receives one and shows nothing.
+//
+// It arrives as a burst of a few pushes, because iOS allows one buzz per
+// notification. Each gets its own tag, so iOS treats it as new and buzzes
+// again, and the one before is closed, so the lock screen shows one.
 self.addEventListener('push', e => {
   let d = {};
   try { d = e.data ? e.data.json() : {}; } catch (err) {}
-  e.waitUntil(self.registration.showNotification(d.title || 'Rest done', {
-    body: d.body || '', tag: 'rest', renotify: true, icon: 'icon-192.png', badge: 'icon-192.png',
+  const reg = self.registration;
+  e.waitUntil(reg.getNotifications().then(ns => {
+    ns.forEach(n => { if ((n.tag || '').startsWith('rest')) n.close(); });
+    return reg.showNotification(d.title || 'Rest done', {
+      body: d.body || '', tag: 'rest-' + (d.n || 1), icon: 'icon-192.png', badge: 'icon-192.png',
+    });
   }));
 });
 self.addEventListener('notificationclick', e => {
