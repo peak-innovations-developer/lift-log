@@ -138,6 +138,9 @@ select{font:inherit;color:var(--text);background:var(--bg);border:1px solid var(
   font-size:22px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--mut);transition:color .12s,font-size .12s}
 .pitem.sel{color:var(--text);font-size:32px;font-weight:700}
 .pband{position:absolute;left:0;right:0;top:66px;height:44px;pointer-events:none;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.ro{display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--card);border-radius:12px;padding:14px;margin:8px 0;font-weight:600;touch-action:none;cursor:grab}
+.ro .hdl{color:var(--mut);font-size:22px;line-height:1}
+.ro.lift{position:relative;z-index:2;background:var(--card2);box-shadow:0 8px 24px rgba(0,0,0,.5)}
 #timer .tadj{width:54px;flex:none;padding:10px 0;font-size:13px;line-height:1.15;font-weight:600;font-variant-numeric:tabular-nums}
 </style>
 </head>
@@ -383,9 +386,14 @@ const SYM = { up: '▲', down: '▼', eq: '=' };
 
 // ---------- views ----------
 let view = 'home', openSess = null, editing = null, editWas = '';
+// Reorder mode: which list is being dragged around ('workout' or 'edit').
+// Nothing moves in the real list until Done.
+let reo = null;
+const reoList = () => reo === 'edit' ? editing && editing.exercises : db.active && db.active.exercises;
 function render() {
   const app = $('#app');
-  if (view === 'workout' && db.active) app.innerHTML = vWorkout();
+  if (reo && reo === view && reoList()) app.innerHTML = vReorder();
+  else if (view === 'workout' && db.active) app.innerHTML = vWorkout();
   else if (view === 'history') app.innerHTML = vHistory();
   else if (view === 'edit' && editing) app.innerHTML = vEdit();
   else if (view === 'settings') app.innerHTML = vSettings();
@@ -400,7 +408,7 @@ function vHome() {
     <div class="mut small" style="margin:4px 0 10px">If you have used Lift Log before, restore from your sync code — nothing gets backed up until you do. Starting fresh is fine too, but write the code below down first. It is the only way back.</div>
     <button class="pri big" data-act="restore">Restore from code</button>
     <div class="code">${esc(syncCode())}</div></div>`;
-  if (a) h += `<div class="card"><div class="mut small">${a.start ? 'In progress' : 'Open, not started'}</div><div style="font-size:18px;font-weight:700;margin:2px 0 10px">${esc(a.name)}${a.start ? ' · <span data-elapsed></span>' : ''}</div><button class="pri big" data-act="nav" data-v="workout">${a.start ? 'Resume' : 'Open'}</button></div>`;
+  if (a) h += `<div class="card"><div class="mut small">${a.pausedAt ? 'Paused ' + fmtD(a.pausedAt) : a.start ? 'In progress' : 'Open, not started'}</div><div style="font-size:18px;font-weight:700;margin:2px 0 10px">${esc(a.name)}${a.start ? ' · <span data-elapsed></span>' : ''}</div><button class="pri big" data-act="resume">${a.start ? 'Resume' : 'Open'}</button></div>`;
   if (!db.imported && !db.sessions.length) h += `<div class="card"><b>Bring in your Easy Reps history</b><div class="mut small" style="margin:4px 0 10px">Pick the History CSV you exported so "last time" numbers show up from day one.</div><button class="pri" data-act="import">Import CSV</button> <button data-act="dismissImport">Skip</button></div>`;
   h += travelSwitch();
   h += `<h2>Up next</h2>`;
@@ -421,14 +429,18 @@ function travelSwitch() {
 }
 function vWorkout() {
   const a = db.active;
-  let h = `<div class="whead"><div class="top"><button data-act="nav" data-v="home">‹ Home</button><div style="text-align:center"><b>${esc(a.name)}</b><div class="mut small" data-elapsed></div></div><span style="width:60px"></span></div></div>`;
+  let h = `<div class="whead"><div class="top"><button data-act="nav" data-v="home">‹ Home</button><div style="text-align:center"><b>${esc(a.name)}</b><div class="mut small" data-elapsed></div></div><button data-act="reorder" data-v="workout"${a.exercises.length < 2 ? ' style="visibility:hidden"' : ''}>Reorder</button></div></div>`;
   if (!a.start) h += `<button class="pri big" data-act="begin">Start workout</button>
     <div class="mut small" style="text-align:center;margin:8px 2px 0">The clock and the rest timer wait for this. Swap, add or remove exercises first if you want — or just tick a set and it starts itself.</div>`;
   h += travelSwitch();
   a.exercises.forEach((ex, i) => h += vEx(ex, i));
   h += `<button class="big" data-act="addEx">+ Add exercise</button>`;
-  h += `<div class="wfoot"><button class="danger" data-act="discard">Discard</button><button class="pri" data-act="finish">Finish</button></div>`;
+  h += `<div class="wfoot"><button class="danger" data-act="discard">Discard</button>${a.start ? '<button data-act="pause">Pause</button>' : ''}<button class="pri" data-act="finish">Finish</button></div>`;
   return h;
+}
+function vReorder() {
+  return `<div class="whead"><div class="top"><button data-act="roCancel">Cancel</button><b>Reorder</b><button class="pri" data-act="roDone">Done</button></div></div>
+    <div id="roList">${reoList().map((ex, i) => `<div class="ro" data-k="${i}"><span>${esc(ex.name)}</span><span class="hdl">≡</span></div>`).join('')}</div>`;
 }
 function vEx(ex, i) {
   const kind = kindOf(ex.name), rest = exRest(ex);
@@ -474,7 +486,7 @@ const dateVal = t => { const d = new Date(t); return d.getFullYear() + '-' + Str
 function vEdit() {
   readEditFields();
   const s = editing;
-  let h = `<div class="top"><button data-act="eCancel">\u2039 Cancel</button><h1 style="font-size:20px">Edit workout</h1><span style="width:60px"></span></div>`;
+  let h = `<div class="top"><button data-act="eCancel">\u2039 Cancel</button><h1 style="font-size:20px">Edit workout</h1><button data-act="reorder" data-v="edit"${s.exercises.length < 2 ? ' style="visibility:hidden"' : ''}>Reorder</button></div>`;
   h += `<div class="card"><b>Name</b><input id="eName" value="${esc(s.name)}" style="margin-top:6px">
     <b style="display:block;margin-top:10px">Date</b><input id="eDate" type="date" value="${dateVal(s.end)}" style="margin-top:6px">
     <div class="mut small" style="margin-top:6px">${Math.round((s.end - s.start) / 60000)} min</div></div>`;
@@ -687,7 +699,13 @@ function alarmTick() {
 }
 
 // Ticking a set is starting the workout, whether or not Start got tapped.
-function beginWorkout() { if (db.active && !db.active.start) { db.active.start = Date.now(); save(); wake(); } }
+function beginWorkout() { if (db.active && !db.active.start) { db.active.start = Date.now(); save(); wake(); } unpause(); }
+// Time actually spent lifting: wall clock since Start, minus every stretch spent paused.
+const workedMs = a => a && a.start ? (a.pausedAt || Date.now()) - a.start - (a.pausedMs || 0) : 0;
+function unpause() {
+  const a = db.active; if (!a || !a.pausedAt) return;
+  a.pausedMs = (a.pausedMs || 0) + Date.now() - a.pausedAt; a.pausedAt = null; save(); wake();
+}
 function startRest(sec, label) { db.timer = { end: Date.now() + sec * 1000, total: sec, label }; firedFor = null; tries = 0; disarm(); tShell = false; save(); tick(); }
 // The bar is built once per rest and then only its numbers move: rewriting it
 // every 250ms would steal the press off a button mid-tap.
@@ -701,7 +719,7 @@ function buildTimerBar() {
   tShell = true;
 }
 function tick() {
-  document.querySelectorAll('[data-elapsed]').forEach(el => { el.textContent = !db.active ? '' : db.active.start ? fmtT((Date.now() - db.active.start) / 1000) : 'Not started'; });
+  document.querySelectorAll('[data-elapsed]').forEach(el => { el.textContent = !db.active ? '' : db.active.start ? fmtT(workedMs(db.active) / 1000) : 'Not started'; });
   const el = $('#timer'), t = db.timer;
   if (!t) { el.hidden = true; if (tShell) { el.innerHTML = ''; tShell = false; } return; }
   el.hidden = false;
@@ -726,7 +744,7 @@ setInterval(tick, 250);
 
 // wake lock keeps the screen on during a workout
 let wl = null;
-async function wake() { try { if (db.active && db.active.start && 'wakeLock' in navigator && !wl) { wl = await navigator.wakeLock.request('screen'); wl.addEventListener('release', () => wl = null); } } catch (e) {} }
+async function wake() { try { if (db.active && db.active.start && !db.active.pausedAt && 'wakeLock' in navigator && !wl) { wl = await navigator.wakeLock.request('screen'); wl.addEventListener('release', () => wl = null); } } catch (e) {} }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { wake(); tick(); } });
 
 // Behave like an app, not a page: no pinch zoom, no double-tap zoom.
@@ -834,6 +852,28 @@ const act = {
     db.timer = null; save(); view = 'workout'; render();
   },
   begin() { beginWorkout(); render(); window.scrollTo(0, 0); },
+  // Leaving with ‹ Home keeps the clock running; Pause stops it until Resume.
+  resume() { unpause(); view = 'workout'; render(); window.scrollTo(0, 0); },
+  pause() {
+    const a = db.active; if (!a || !a.start) return;
+    a.pausedAt = Date.now(); disarm(); db.timer = null; save();
+    try { wl && wl.release(); } catch (e) {}
+    view = 'home'; render(); window.scrollTo(0, 0); toast('Paused. Resume from here.');
+  },
+  reorder(b) { if (b.dataset.v === 'edit') readEditFields(); closeSheet(); reo = b.dataset.v; render(); window.scrollTo(0, 0); },
+  roCancel() { reo = null; render(); },
+  async roDone() {
+    const order = [...document.querySelectorAll('.ro')].map(r => +r.dataset.k), from = reo;
+    reo = null;
+    if (order.every((k, i) => k === i)) return render();
+    if (from === 'edit') { editing.exercises = order.map(k => editing.exercises[k]); return render(); }
+    const t = curTmpl();
+    const sc = await askScope('Save this order', '', 'Just today', t && `Today and in the ${t.name} template`);
+    if (!sc) { reo = from; return; }
+    const a = db.active.exercises = order.map(k => db.active.exercises[k]);
+    if (sc === 'future') { const pos = e => { const k = a.findIndex(x => key(x.orig || x.name) === key(e.name)); return k < 0 ? 999 : k; }; t.ex.sort((x, y) => pos(x) - pos(y)); }
+    save(); render();
+  },
   toggleBw(b) { const ex = db.active.exercises[b.dataset.i]; ex.bw = !ex.bw; prefill(ex); save(); render(); },
   rest(b) {
     const ex = db.active.exercises[b.dataset.i];
@@ -868,8 +908,7 @@ const act = {
     const i = +b.dataset.i;
     sheet(`<h3>${esc(db.active.exercises[i].name)}</h3><div class="list">
       <button data-act="swap" data-i="${i}">Swap for another exercise…</button>
-      <button data-act="move" data-i="${i}" data-d="-1">Move up…</button>
-      <button data-act="move" data-i="${i}" data-d="1">Move down…</button>
+      <button data-act="reorder" data-v="workout">Reorder exercises…</button>
       <button data-act="exKind" data-i="${i}">Change type (${KIND_LABEL[kindOf(db.active.exercises[i].name)]})</button>
       <button class="danger" data-act="delEx" data-i="${i}">Remove…</button></div>`);
   },
@@ -881,13 +920,6 @@ const act = {
     const ex = db.active.exercises[b.dataset.i]; db.kinds[key(ex.name)] = b.dataset.k;
     ex.bw = b.dataset.k === 'bw' ? true : b.dataset.k === 'load' ? false : ex.bw;
     prefill(ex); closeSheet(); save(); render();
-  },
-  async move(b) {
-    const i = +b.dataset.i, j = i + +b.dataset.d, a = db.active.exercises; if (j < 0 || j >= a.length) return closeSheet();
-    const sc = await askScope(`Move ${a[i].name} ${+b.dataset.d < 0 ? 'up' : 'down'}`, '', 'Just today', `Today and in the ${curTmpl() && curTmpl().name} template`); if (!sc) return;
-    [a[i], a[j]] = [a[j], a[i]];
-    if (sc === 'future') { const t = curTmpl(), pos = e => { const k = a.findIndex(x => key(x.orig || x.name) === key(e.name)); return k < 0 ? 999 : k; }; t.ex.sort((x, y) => pos(x) - pos(y)); }
-    save(); render();
   },
   async delEx(b) {
     const i = +b.dataset.i, ex = db.active.exercises[i], t = curTmpl();
@@ -949,7 +981,10 @@ const act = {
       sets.forEach((s, j) => { const c = cmp(s, e.last && e.last[j], e.bw); if (c === 'up') up++; if (c === 'eq') eq++; });
       return { name: e.name, sets, bw: e.bw, orig: e.orig };
     }).filter(e => e.sets.length);
-    const sess = { id: a.id, name: saveAs || a.name, start: a.start || a.opened || Date.now(), end: Date.now(), exercises: exercises.map(({ name, sets }) => ({ name, sets })) };
+    // Duration is read everywhere as end − start, so a paused stretch comes out by
+    // moving start forward rather than by adding a field every reader must know about.
+    const end = Date.now();
+    const sess = { id: a.id, name: saveAs || a.name, start: a.start ? end - workedMs(a) : (a.opened || end), end, exercises: exercises.map(({ name, sets }) => ({ name, sets })) };
     if (saveAs) db.templates.push({ id: uid(), name: saveAs, ex: exercises.map(e => ({ name: e.name, sets: e.sets.length, bw: e.bw })) });
     db.sessions.push(sess); db.active = null; db.timer = null; save(); closeSheet();
     try { wl && wl.release(); } catch (e) {}
@@ -983,18 +1018,12 @@ const act = {
     const i = +b.dataset.i;
     sheet(`<h3>${esc(editing.exercises[i].name)}</h3><div class="list">
       <button data-act="eSwapEx" data-i="${i}">Change which exercise this was\u2026</button>
-      <button data-act="eMove" data-i="${i}" data-d="-1">Move up</button>
-      <button data-act="eMove" data-i="${i}" data-d="1">Move down</button>
+      <button data-act="reorder" data-v="edit">Reorder exercises</button>
       <button class="danger" data-act="eDelEx" data-i="${i}">Remove from this workout</button></div>`);
   },
   eSwapEx(b) {
     const ex = editing.exercises[+b.dataset.i];
     pickExerciseSheet(`This was\u2026`, n => { ex.name = canon(n); render(); });
-  },
-  eMove(b) {
-    const i = +b.dataset.i, j = i + +b.dataset.d, a = editing.exercises;
-    if (j < 0 || j >= a.length) return closeSheet();
-    [a[i], a[j]] = [a[j], a[i]]; closeSheet(); render();
   },
   eDelEx(b) { editing.exercises.splice(+b.dataset.i, 1); closeSheet(); render(); },
   eAddEx() { pickExerciseSheet('Add exercise', n => { editing.exercises.push({ name: canon(n), sets: [{ w: 0, r: 0 }] }); render(); window.scrollTo(0, document.body.scrollHeight); }); },
@@ -1055,6 +1084,28 @@ document.addEventListener('click', e => {
   const f = act[b.dataset.act]; if (f) f(b, e);
 });
 document.addEventListener('change', e => { if (e.target.id === 'progEx') { hs.ex = e.target.value; hs.pt = null; const k = kindOf(hs.ex); hs.bw = k === 'bw'; render(); } });
+// Drag to reorder. Pointer events rather than HTML5 drag-and-drop, which iOS
+// Safari does not do with a finger. The row stays in the list and is moved past
+// a neighbour once the finger crosses that neighbour's middle; the transform only
+// keeps it under the finger in between.
+let drag = null;
+document.addEventListener('pointerdown', e => {
+  const row = e.target.closest('.ro'); if (!row) return;
+  e.preventDefault(); row.setPointerCapture(e.pointerId);
+  drag = { row, id: e.pointerId, y0: e.clientY, top0: row.offsetTop };
+  row.classList.add('lift');
+});
+document.addEventListener('pointermove', e => {
+  if (!drag || e.pointerId !== drag.id) return;
+  const { row } = drag, y = e.clientY, mid = el => { const r = el.getBoundingClientRect(); return r.top + r.height / 2; };
+  let sib;
+  while ((sib = row.previousElementSibling) && y < mid(sib)) row.parentNode.insertBefore(row, sib);
+  while ((sib = row.nextElementSibling) && y > mid(sib)) row.parentNode.insertBefore(sib, row);
+  row.style.transform = `translateY(${y - drag.y0 - (row.offsetTop - drag.top0)}px)`;
+});
+const endDrag = e => { if (!drag || e.pointerId !== drag.id) return; drag.row.style.transform = ''; drag.row.classList.remove('lift'); drag = null; };
+document.addEventListener('pointerup', endDrag);
+document.addEventListener('pointercancel', endDrag);
 document.addEventListener('focusin', e => { if (e.target.matches('.stp input')) setTimeout(() => e.target.select(), 0); });
 // A set row looks the same whether it is today's workout or a finished one
 // being corrected; data-edit says which object the number belongs to.
@@ -1176,7 +1227,7 @@ load();
 // the device store is the pairing the flag is meant to record.
 if (db.sessions.length) markEstablished();
 if (window.SEED_CSV && !db.sessions.length && !db.imported) { const rows = parseCSV(window.SEED_CSV), hd = rows.shift().map(h => h.trim()); importHistory(rows, n => hd.indexOf(n)); applyKinds(); db.imported = true; save(); }
-if (db.active) { view = 'workout'; wake(); }
+if (db.active && !db.active.pausedAt) { view = 'workout'; wake(); }
 render();
 queuePush();
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => {});
