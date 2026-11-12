@@ -10,3 +10,21 @@ self.addEventListener('fetch', e => {
       .catch(() => caches.match(e.request, { ignoreSearch: true }).then(r => r || caches.match('./index.html')))
   );
 });
+
+// The rest alarm, sent by the server when the rest ends (see the alarm code in
+// index.html). It has to show a notification every time: iOS revokes push for
+// an app that receives one and shows nothing. The tag keeps one on screen.
+self.addEventListener('push', e => {
+  let d = {};
+  try { d = e.data ? e.data.json() : {}; } catch (err) {}
+  e.waitUntil(self.registration.showNotification(d.title || 'Rest done', {
+    body: d.body || '', tag: 'rest', renotify: true, icon: 'icon-192.png', badge: 'icon-192.png',
+  }));
+});
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(cs => {
+    const c = cs.find(x => 'focus' in x);
+    return c ? c.focus() : self.clients.openWindow('./');
+  }));
+});

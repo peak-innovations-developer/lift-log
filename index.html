@@ -607,7 +607,9 @@ function vSettings() {
   return `<div class="top"><button data-act="nav" data-v="home">‹ Home</button><h1 style="font-size:20px">Settings</h1><span style="width:60px"></span></div>
   <div class="card"><b>Default rest</b><div class="mut small" style="margin:2px 0 8px">Used for any exercise you haven't set its own rest on.</div>
   ${pickerHTML('defRestP', db.settings.rest)}
-  <button data-act="testBeep">Test the alarm</button></div>
+  <button data-act="testBeep">Test the alarm</button><div class="mut small" data-wake style="margin-top:8px">${wakeLabel()}</div></div>
+  <div class="switch"><div><b>Notify when rest ends</b>${pushLabel() ? `<div class="mut small">${pushLabel()}</div>` : ''}</div><button class="tog ${pushOn() ? 'on' : ''}" data-act="pushToggle" aria-label="Notify when rest ends"${pushSupported() && Notification.permission !== 'denied' ? '' : ' disabled'}></button></div>
+  ${pushOn() ? `<button class="big" data-act="pushTest" style="margin-bottom:10px">Send a test in 6 seconds</button>` : ''}
   <div class="card"><b>Travel swaps</b><div class="mut small" style="margin:2px 0 8px">Remembered when you swap a weights exercise in travel mode.</div>
   ${Object.keys(db.settings.subs).length ? Object.entries(db.settings.subs).map(([k, v]) => `<div class="row" style="align-items:center;margin:4px 0"><span>${esc(canonFromKey(k))} → ${esc(v)}</span><button style="flex:none" data-act="delSub" data-k="${esc(k)}">✕</button></div>`).join('') : '<div class="mut small">None yet</div>'}</div>
   <div class="card"><b>Automatic backup</b><div class="mut small" id="syncLine" style="margin:2px 0 8px">${esc(syncLabel())}</div>
@@ -720,6 +722,8 @@ function buildTimerBar() {
 }
 function tick() {
   document.querySelectorAll('[data-elapsed]').forEach(el => { el.textContent = !db.active ? '' : db.active.start ? fmtT(workedMs(db.active) / 1000) : 'Not started'; });
+  wakeKeep(); pushSync();
+  document.querySelectorAll('[data-wake]').forEach(el => { el.textContent = wakeLabel(); });
   const el = $('#timer'), t = db.timer;
   if (!t) { el.hidden = true; if (tShell) { el.innerHTML = ''; tShell = false; } return; }
   el.hidden = false;
@@ -743,8 +747,71 @@ function tAdjust(d) {
 setInterval(tick, 250);
 
 // wake lock keeps the screen on during a workout
-let wl = null;
-async function wake() { try { if (db.active && db.active.start && !db.active.pausedAt && 'wakeLock' in navigator && !wl) { wl = await navigator.wakeLock.request('screen'); wl.addEventListener('release', () => wl = null); } } catch (e) {} }
+// It used to be asked for once, at Start and on return to the app. iOS can drop
+// it in between without the page ever going hidden, and then nothing asked again
+// and the screen slept mid-rest — which silences the alarm, since a dark screen
+// is a suspended app. So the tick re-asks whenever it is missing (wakeKeep).
+let wl = null, wlAsking = false, wlErr = '', wlLastTry = 0;
+const wantAwake = () => !!(db.active && db.active.start && !db.active.pausedAt);
+async function wake() {
+  if (!wantAwake() || wl || wlAsking) return;
+  if (!('wakeLock' in navigator)) { wlErr = 'not supported on this phone'; return; }
+  wlAsking = true; wlLastTry = Date.now();
+  try {
+    const l = await navigator.wakeLock.request('screen');
+    if (!wantAwake()) { l.release(); return; }
+    wl = l; wlErr = ''; l.addEventListener('release', () => { if (wl === l) wl = null; });
+  } catch (e) { wlErr = e.name || 'refused'; } finally { wlAsking = false; }
+}
+// ---------- rest alarm by push ----------
+// A dark screen is a frozen app, and a frozen app cannot ring. So the end of
+// every rest is also handed to the server (liftlog_alarm in Supabase), which
+// sends a push notification at that moment: it rings with the ringer on,
+// buzzes on silent, and shows on the lock screen. The in-app beep stays for
+// when the app is on screen.
+//
+// One alarm slot per phone. The tick compares what the server was last told
+// against the rest that is running now and sends the difference — so starting,
+// adjusting, skipping, pausing and finishing all re-arm or cancel without each
+// of them having to remember to.
+const VAPID_PUB = 'BGlOZjpu7ogG3sC5k3Bqm8TTs9R5YnkupdVjzAHM2kdYnVWyu4qP35C9KfMVcSEFKAJp0BcRi7cQyDN9BHjl5TU';
+const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const pushOn = () => pushSupported() && Notification.permission === 'granted' && db.settings.pushRest === true;
+let pushSub = null, pushArmed, pushBusy = false, pushRetryAt = 0, pushTestUntil = 0;
+async function getPushSub(create) {
+  const reg = await navigator.serviceWorker.ready;
+  let s = await reg.pushManager.getSubscription();
+  if (!s && create) {
+    const raw = atob(VAPID_PUB.replace(/-/g, '+').replace(/_/g, '/'));
+    s = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: Uint8Array.from(raw, c => c.charCodeAt(0)) });
+  }
+  return s;
+}
+// keepalive: the rest usually starts with a tap and then the phone goes in a
+// pocket. The request has to land even if the page is frozen mid-flight.
+async function sendAlarm(at, label) {
+  if (!pushSub) pushSub = await getPushSub(true);
+  if (!pushSub) throw new Error('no subscription');
+  const r = await fetch(SB_URL + '/rest/v1/rpc/liftlog_alarm', {
+    method: 'POST', keepalive: true,
+    headers: { 'content-type': 'application/json', apikey: SB_ANON, authorization: 'Bearer ' + SB_ANON },
+    body: JSON.stringify({ p_sub: pushSub.toJSON(), p_at: at ? new Date(at).toISOString() : null, p_label: label || null }),
+  });
+  if (!r.ok) throw new Error((await r.text()).slice(0, 160));
+}
+function pushSync() {
+  if (!pushOn() || pushBusy || Date.now() < pushRetryAt || Date.now() < pushTestUntil) return;
+  const t = db.timer, want = t && t.end > Date.now() + 1500 ? t.end : null;
+  if (want === pushArmed) return;
+  pushBusy = true;
+  sendAlarm(want, t && t.label).then(() => { pushArmed = want; }, () => { pushSub = null; pushRetryAt = Date.now() + 3000; })
+    .finally(() => { pushBusy = false; });
+}
+const pushLabel = () => !pushSupported() ? 'Add Lift Log to your Home Screen to get the alarm with the screen off.'
+  : Notification.permission === 'denied' ? 'Notifications are blocked. Turn them on for Lift Log in iPhone Settings → Notifications.' : '';
+function wakeKeep() { if (!document.hidden && wantAwake() && !wl && Date.now() - wlLastTry > 2000) wake(); }
+const wakeLabel = () => !('wakeLock' in navigator) ? 'Keep screen on: not supported on this phone'
+  : wl ? 'Keep screen on: on' : !wantAwake() ? 'Keep screen on: only during a workout' : 'Keep screen on: not holding' + (wlErr ? ' (' + wlErr + ')' : '');
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { wake(); tick(); } });
 
 // Behave like an app, not a page: no pinch zoom, no double-tap zoom.
@@ -903,6 +970,26 @@ const act = {
   delSet(b) { const ex = db.active.exercises[b.dataset.i]; const k = ex.sets.map(s => !s.done).lastIndexOf(true); if (k >= 0) ex.sets.splice(k, 1); ex.setsEdited = true; save(); render(); },
   tStop() { disarm(); db.timer = null; save(); tick(); },
   tDelta(b) { tAdjust(+b.dataset.d); },
+  // Asking for permission and subscribing both have to happen inside the tap.
+  async pushToggle() {
+    if (pushOn()) {
+      db.settings.pushRest = false; save(); render();
+      if (pushArmed) { sendAlarm(null).catch(() => {}); } pushArmed = undefined;
+      return;
+    }
+    try {
+      if (await Notification.requestPermission() !== 'granted') { render(); return toast('Notifications are off for Lift Log'); }
+      pushSub = await getPushSub(true);
+      db.settings.pushRest = true; pushArmed = undefined; save(); render(); toast('Rest alarm will come as a notification');
+    } catch (e) { toast('Could not turn it on: ' + (e.message || e)); }
+  },
+  async pushTest() {
+    try {
+      pushTestUntil = Date.now() + 9000;
+      await sendAlarm(Date.now() + 6000, 'Test');
+      pushArmed = 'test'; toast('Lock your phone now');
+    } catch (e) { pushTestUntil = 0; toast('Test failed: ' + (e.message || e)); }
+  },
   testBeep() { const ctx = primeAudio(); if (ctx) try { beepAt(ctx, ctx.currentTime + .05); } catch (e) {} toast('Heard nothing? Check the ringer switch.'); },
   exMenu(b) {
     const i = +b.dataset.i;
@@ -1080,7 +1167,7 @@ const act = {
 
 document.addEventListener('click', e => {
   const b = e.target.closest('[data-act]'); if (!b) return;
-  primeAudio();
+  primeAudio(); wake();
   const f = act[b.dataset.act]; if (f) f(b, e);
 });
 document.addEventListener('change', e => { if (e.target.id === 'progEx') { hs.ex = e.target.value; hs.pt = null; const k = kindOf(hs.ex); hs.bw = k === 'bw'; render(); } });
